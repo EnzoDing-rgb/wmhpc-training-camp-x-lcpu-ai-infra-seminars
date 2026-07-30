@@ -1,6 +1,8 @@
 # Weiming HPC Training Camp x LCPU AI Infra Seminars
 
-北京大学未名超算队（The Radiance of Weiming）与北京大学学生 Linux 俱乐部（LCPU）合办的暑期 AI Infra 系列活动仓库。每次 session 的讲义、作业与配套代码放在对应的 `assignmentXX/` 目录。
+北京大学未名超算队（The Radiance of Weiming）与北京大学学生 Linux 俱乐部（LCPU）合办的暑期 AI Infra 系列活动仓库。每次 session 的作业与配套代码放在对应的 `assignmentXX/` 目录。
+
+[official website](https://infra.seminars.lcpu.dev)
 
 ## 内容
 
