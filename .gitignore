@@ -52,5 +52,8 @@ cot.md
 notes.md
 secrets/
 
+# uv lock file — reproducible but platform-specific, use pyproject.toml
+uv.lock
+
 # Organizer-only tooling (HPC Game 题库上传脚本等)
 tools/
