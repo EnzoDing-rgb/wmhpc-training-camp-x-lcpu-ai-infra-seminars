@@ -28,9 +28,11 @@ int main() {
     CUDA_CHECK(cudaMemcpy(d_b, h_b, bytes, cudaMemcpyHostToDevice));
     CUDA_CHECK(cudaMemset(d_c, 0, bytes));
 
-    int threads = 2048;
+    // 曾经的bug在这里，就是 thread 的数量不能超过 1024
+    int threads = 256;
     int blocks = (n + threads - 1) / threads;
     vectorAdd<<<blocks, threads>>>(d_a, d_b, d_c, n);
+    CUDA_CHECK_KERNEL();
     // 注意：这里故意没有做任何错误检查。
 
     CUDA_CHECK(cudaMemcpy(h_c, d_c, bytes, cudaMemcpyDeviceToHost));
