@@ -4,6 +4,7 @@
 
 // stride = 1 时是连续访问；stride 变大后，warp 里相邻线程读的地址
 // 相距 stride 个 float。n 是 2 的幂，& (n-1) 等价于取模。
+// 如果是隔着访问的话，会导致 Cache Line 一次取的这些数的数据利用率更低
 __global__ void strided_copy(const float *in, float *out, int n, int stride) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i < n) {

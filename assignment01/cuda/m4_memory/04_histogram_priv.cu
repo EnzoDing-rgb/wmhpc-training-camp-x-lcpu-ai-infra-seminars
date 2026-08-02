@@ -6,6 +6,8 @@
 //   2. block 内线程往自己的计数器里 atomicAdd；
 //   3. 同步之后，把 shared 直方图的 256 个 bucket 用 atomicAdd 汇入全局直方图。
 // 两版都要 PASS。评测结果会包含两版的耗时和比值，解释提速来自哪里。
+// 这里主要通过在 SRAM 上申请，同步在 atomic add 来体现 SRAM 比 global memory 快很多这一点
+// 同时也降低了因为并发导致的锁竞争
 #include "common.h"
 
 #define BINS 256
@@ -21,7 +23,22 @@ __global__ void histogram_naive(const unsigned char *data, unsigned int *hist,
 
 __global__ void histogram_priv(const unsigned char *data, unsigned int *hist,
                                int n) {
-    // TODO：从这里开始写（shared memory 私有化版本）
+    // 第 1 步：每个 block 申请自己的草稿本并清零
+    __shared__ unsigned int s_hist[BINS];
+    for (int b = threadIdx.x; b < BINS; b += blockDim.x) // 这里的隐含含义: 循环一次的里边，bins 数量的线程并行做
+        s_hist[b] = 0;
+    __syncthreads();
+
+    // 第 2 步：干活，打到草稿本上（shared memory atomic，快）
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int stride = blockDim.x * gridDim.x;
+    for (; i < n; i += stride)
+        atomicAdd(&s_hist[data[i]], 1u);
+    __syncthreads();
+
+    // 第 3 步：把草稿本汇入全局直方图
+    for (int b = threadIdx.x; b < BINS; b += blockDim.x)
+        atomicAdd(&hist[b], s_hist[b]);
 }
 
 // ---------------- 以下是判测与计时，不要修改 ----------------

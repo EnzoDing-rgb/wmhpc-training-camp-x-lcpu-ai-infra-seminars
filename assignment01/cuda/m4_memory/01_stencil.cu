@@ -12,7 +12,7 @@
 
 __global__ void stencil_static(const float *in, float *out, int n) {
     // ====== 空 1：静态 shared 数组，要装下 BLOCK 个元素加两侧 halo ======
-    __shared__ float tile[BLOCK + 2* RADIUS];
+    __shared__ float tile[BLOCK + 2 * RADIUS];
 
     int g = blockIdx.x * blockDim.x + threadIdx.x;  // 全局下标
     int l = threadIdx.x + RADIUS;                   // 在 tile 里的位置
@@ -38,6 +38,7 @@ __global__ void stencil_static(const float *in, float *out, int n) {
 __global__ void stencil_dynamic(const float *in, float *out, int n) {
     // ====== 空 4：动态 shared 数组的声明方式（大小在 launch 时才给出） ======
     /* 填这里（声明动态 shared 数组 tile）*/
+    // 这算是性能优化的关键
     extern __shared__ float tile[];
 
     int g = blockIdx.x * blockDim.x + threadIdx.x;
