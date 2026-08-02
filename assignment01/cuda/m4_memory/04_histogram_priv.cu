@@ -23,7 +23,7 @@ __global__ void histogram_naive(const unsigned char *data, unsigned int *hist,
 
 __global__ void histogram_priv(const unsigned char *data, unsigned int *hist,
                                int n) {
-    // 第 1 步：每个 block 申请自己的草稿本并清零
+    // 第 1 步：每个 block 申请自己的【草稿本/片上内存】并清零
     __shared__ unsigned int s_hist[BINS];
     for (int b = threadIdx.x; b < BINS; b += blockDim.x) // 这里的隐含含义: 循环一次的里边，bins 数量的线程并行做
         s_hist[b] = 0;
