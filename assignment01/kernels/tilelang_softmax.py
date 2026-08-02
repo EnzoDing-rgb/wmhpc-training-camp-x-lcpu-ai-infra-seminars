@@ -24,5 +24,41 @@ import tilelang
 import tilelang.language as T
 
 
+def make_softmax(M, N, threads = 128, dtype = "float32"):
+  N_pad = 1 << (N - 1).bit_length()
+  block_M = max(1, min(256, 4096 // N_pad))
+
+  @T.prim_func
+  def main(X: T.Buffer((M, N), dtype), Y: T.Buffer((M, N), dtype)):
+    with T.Kernel (T.ceildiv(M, block_M), threads=threads) as (bx,):
+      frag = T.alloc_fragment((block_M, N_pad), dtype)
+      m = T.alloc_fragment((block_M, ), dtype)
+      s = T.alloc_fragment((block_M, ), dtype)
+      
+      for i, j in T.Parallel(block_M, N_pad):
+        frag[i, j] = T.if_then_else(j < N, X[bx * block_M + i, j], -T.infinity(dtype))
+
+      T.fill(m, -T.infinity(dtype))
+      T.reduce_max(frag, m, dim = 1)
+
+      for i, j in T.Parallel(block_M, N_pad):
+        frag[i, j] = T.exp(frag[i, j] - m[i])
+
+      T.fill(s, 0)
+      T.reduce_sum(frag, s, dim = 1)
+
+      for i, j in T.Parallel(block_M, N_pad):
+        frag[i, j] = frag[i, j] / s[i]
+
+      T.copy(frag, Y[bx * block_M, 0])
+
+  return main
+
+_cache = {}
+
 def softmax(x: torch.Tensor) -> torch.Tensor:
-    raise NotImplementedError("从这里开始写")
+    M, N = x.shape
+    key = (M, N)
+    if key not in _cache:
+        _cache[key] = tilelang.compile(make_softmax(M, N), out_idx=[1])
+    return _cache[key](x)
