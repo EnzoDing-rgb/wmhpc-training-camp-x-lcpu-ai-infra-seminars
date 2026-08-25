@@ -1,0 +1,606 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Section 0 · 环境与峰值 — 心智模型与逐行拆解</title>
+<style>
+  :root{
+    --ink:#1f2430; --sub:#5b6472; --line:#e4e7ec; --bg:#fbfbfc;
+    --accent:#2563eb; --accent-soft:#eff4ff;
+    --a-col:#2563eb; --b-col:#059669; --d-col:#d97706;
+    --code-bg:#f4f5f7;
+  }
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Noto Sans CJK SC",sans-serif;
+       color:var(--ink); background:var(--bg); line-height:1.65; margin:0; padding:0 18px 80px; font-size:15px;}
+  .wrap{max-width:1100px; margin:0 auto;}
+  h1{font-size:26px; margin:28px 0 6px;}
+  h1 small{display:block; font-size:14px; color:var(--sub); font-weight:400; margin-top:4px;}
+  h2{font-size:21px; margin:44px 0 12px; padding-top:14px; border-top:2px solid var(--line);}
+  h3{font-size:17px; margin:26px 0 8px;}
+  p{margin:10px 0;}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:0.92em;
+       background:var(--code-bg); padding:1px 5px; border-radius:4px;}
+  pre{background:#0f172a; color:#e2e8f0; padding:14px 16px; border-radius:8px; overflow-x:auto;
+      font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:13.5px; line-height:1.55;}
+  pre code{background:none; color:inherit; padding:0;}
+  .annot{color:#94a3b8;}
+  .tag{display:inline-block; font-size:12px; color:#fff; border-radius:4px; padding:1px 8px; margin-right:6px; vertical-align:1px;}
+  .tag.a{background:var(--a-col);} .tag.b{background:var(--b-col);} .tag.d{background:var(--d-col);}
+  .keybox{background:var(--accent-soft); border-left:4px solid var(--accent); padding:10px 14px; border-radius:0 6px 6px 0; margin:14px 0;}
+  .keybox b{color:var(--accent);}
+  table{border-collapse:collapse; width:100%; margin:12px 0; font-size:14px;}
+  th,td{border:1px solid var(--line); padding:6px 10px; text-align:left;}
+  th{background:var(--code-bg);}
+  details{background:#fff; border:1px solid var(--line); border-radius:8px; padding:8px 14px; margin:10px 0;}
+  summary{cursor:pointer; font-weight:600;}
+  ul{margin:8px 0; padding-left:22px;}
+  li{margin:4px 0;}
+
+  /* ---- CUDA core 几何 ---- */
+  .dgrid{display:grid; grid-template-columns:repeat(8,34px); gap:2px; width:max-content; margin:12px 0; background:#cbd5e1; padding:1px; border:1px solid #94a3b8; border-radius:4px;}
+  .dgrid .dk{width:34px; height:26px; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600; color:#0f172a; font-family:ui-monospace,Menlo,Consolas,monospace;}
+  pre.geom{background:#fff; border:1px solid var(--line); color:var(--ink);}
+  pre.geom .annot{color:#64748b;}
+  .geom3{display:flex; align-items:center; gap:12px; flex-wrap:wrap; margin:12px 0;}
+  .gbox{border:2px solid; border-radius:8px; padding:10px 14px; font-size:14px; background:#fff;}
+  .gbox b{font-size:16px;}
+  .gbox span{display:block; font-size:12px; color:var(--sub); margin-top:4px;}
+  .gbox.a{border-color:var(--a-col);} .gbox.b{border-color:var(--b-col);} .gbox.d{border-color:var(--d-col);}
+  .gop{font-size:20px; font-weight:700; color:var(--sub);}
+
+  /* ---- tensor core 阵列 ---- */
+  .tcwrap{display:grid; grid-template-columns:90px repeat(8,52px); gap:2px; width:max-content; margin:12px 0;}
+  .tclabel{display:flex; align-items:center; justify-content:flex-end; padding-right:6px; font-size:11px; color:var(--sub); font-family:ui-monospace,Menlo,Consolas,monospace;}
+  .tchead{display:flex; align-items:center; justify-content:center; font-size:10px; color:var(--sub); font-family:ui-monospace,Menlo,Consolas,monospace;}
+  .tccell{width:52px; height:24px; display:flex; align-items:center; justify-content:center; font-size:11px; font-family:ui-monospace,Menlo,Consolas,monospace; background:#fff; border:1px solid #e2e8f0; border-radius:3px;}
+  .tccell.hl{outline:2px solid var(--d-col); outline-offset:-2px; font-weight:700; background:#fff7ed;}
+  .kacc th,.kacc td{padding:2px 8px; text-align:right; font-size:13px; font-variant-numeric:tabular-nums;}
+  .kacc th{background:var(--code-bg);}
+
+  /* ---- 块地图 ---- */
+  .maps{display:flex; gap:22px; flex-wrap:wrap; align-items:flex-start; margin:14px 0;}
+  .mapbox{border:1px solid var(--line); border-radius:10px; padding:12px 14px; background:#fff;}
+  .mapbox .mtitle{font-weight:700; margin-bottom:2px;}
+  .mapbox .mdim{color:var(--sub); font-size:13px;}
+  .map{display:grid; grid-template-columns:repeat(4,64px); gap:4px; margin:10px 0;}
+  .map .blk{height:30px; display:flex; flex-direction:column; align-items:center; justify-content:center;
+            border-radius:5px; font-weight:700; font-size:13px; color:#0f172a; border:1px solid rgba(0,0,0,.12);}
+  .map .blk small{font-size:9px; font-weight:500; color:#475569; line-height:1;}
+  .g0{background:#bae6fd}.g1{background:#bfdbfe}.g2{background:#c7d2fe}.g3{background:#ddd6fe}
+  .g4{background:#fbcfe8}.g5{background:#fed7aa}.g6{background:#fde68a}.g7{background:#d9f99d}
+  .legend{display:flex; gap:5px; align-items:center; flex-wrap:wrap; font-size:12px; color:var(--sub);}
+  .legend .sw{width:14px; height:14px; border-radius:3px; border:1px solid rgba(0,0,0,.15);}
+  .cap{font-size:13px; color:var(--sub);}
+  .zoom pre{background:#fff; border:1px solid var(--line); color:var(--ink);}
+  .zoom pre .annot{color:#64748b;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>Section 0 · 环境与峰值<small>心智模型 + 逐行拆解 · 配套代码 <code>cuda/m0_env/01_first_mma.cu</code> · 建议阅读顺序:0 → 1 → 2 → 3 → 4 → 5</small></h1>
+
+<div class="keybox"><b>一句话纲领</b>:这段代码用 <b>32 个线程(1 个 warp)</b> 协作算一次
+<code>D[16×8] = A[16×16] × B[16×8]</code>。每个线程只拿矩阵的一小块(叫 <b>fragment</b>)装进自己的寄存器,
+然后<b>一条 <code>mma.sync</code> 指令</b>让硬件把整个矩阵乘一口气算完。
+本页把这句话拆成 5 步:先懂<b>为什么用 Tensor Core</b>(第 0 节)→ 扫<b>术语</b>(第 1 节)→
+看<b>谁拿哪一块</b>(第 2 节)→ <b>对着图读代码</b>(第 3 节)→ <b>编译链</b>(第 4 节)→ <b>动手跑</b>(第 5 节)。</div>
+
+<!-- ================= 0. 第一性 ================= -->
+<h2 id="s0">0 · 第一性:为什么是 Tensor Core,而不是 CUDA Core?</h2>
+
+<p>同一个计算 <code>D[16×8] = A[16×16] × B[16×8]</code>,用 CUDA Core 和用 Tensor Core 都能做。
+<b>结果完全一样,差别全在硬件怎么执行。</b>先看"朴素"的 CUDA Core 版本:</p>
+
+<h3>写法 A:CUDA Core(FFMA)——每个输出元素一针一线地算</h3>
+<pre><code><span class="annot">// 用 CUDA Core 的 FMA 指令算 D[16×8] = A[16×16] × B[16×8]</span>
+<span class="annot">// 思路:每个线程负责 D 里的 4 个输出元素,沿 K 循环累加。</span>
+<span class="annot">// 32 线程 × 4 输出 = 128 个输出 = D 的全部 16×8。</span>
+__global__ void cuda_core_demo(const float* A, const float* B, float* D) {
+    int lane = threadIdx.x;          <span class="annot">// 0..31</span>
+    int r = lane &gt;&gt; 1;              <span class="annot">// 行:每 2 个线程瓜分一行 → 0..15</span>
+    int c = (lane &amp; 1) * 4;          <span class="annot">// 列:线程内 4 个连续输出</span>
+
+    float d[4] = {0.f, 0.f, 0.f, 0.f};
+    for (int k = 0; k &lt; 16; k++)          <span class="annot">// 沿 K 累加 16 次</span>
+        for (int j = 0; j &lt; 4; j++)       <span class="annot">// 4 个输出</span>
+            d[j] += A[r * 16 + k] * B[k * 8 + c + j];  <span class="annot">// 一行 FFMA</span>
+
+    for (int j = 0; j &lt; 4; j++)
+        D[r * 8 + c + j] = d[j];       <span class="annot">// 写回</span>
+}</code></pre>
+<p>每个线程 <code>16 k × 4 j = 64</code> 条 FFMA;整个 warp = <b>2048 条 FFMA 指令</b>。</p>
+
+<h3>把写法 A 变成图:M、N、K 在哪,128 个输出是谁的</h3>
+
+<p><b>矩阵乘的几何</b>——M/N/K 是三个方向的长度,一眼看懂:</p>
+<div class="geom3">
+  <div class="gbox a"><b>A: 16×16</b> <span>M=16 行 × K=16 列。<br>第 r 行有 K 个元素 → <code>A[r][*]</code></span></div>
+  <div class="gop">×</div>
+  <div class="gbox b"><b>B: 16×8</b> <span>K=16 行 × N=8 列。<br>第 n 列有 K 个元素 → <code>B[*][n]</code></span></div>
+  <div class="gop">=</div>
+  <div class="gbox d"><b>D: 16×8</b> <span>M=16 行 × N=8 列 = <b>128 个输出</b>。<br><code>D[r][n] = Σ<sub>k=0..15</sub> A[r][k]·B[k][n]</code></span></div>
+</div>
+<p class="cap"><code>M=16</code>(行)、<code>N=8</code>(列)、<code>K=16</code>(被 for 循环缩并掉的维度:A 的列数 = B 的行数 = 点积长度)。</p>
+
+<p><b>D 的 128 个输出,分给 32 个线程</b>——每格 = 一个输出,格子里是拥有它的 lane 号,
+颜色是 lane 的组;每 4 个连续格 = 1 个线程,每行 2 个线程:</p>
+<div class="dgrid">
+  <div class="dk g0">0</div><div class="dk g0">0</div><div class="dk g0">0</div><div class="dk g0">0</div><div class="dk g1">1</div><div class="dk g1">1</div><div class="dk g1">1</div><div class="dk g1">1</div>
+  <div class="dk g2">2</div><div class="dk g2">2</div><div class="dk g2">2</div><div class="dk g2">2</div><div class="dk g3">3</div><div class="dk g3">3</div><div class="dk g3">3</div><div class="dk g3">3</div>
+  <div class="dk g4">4</div><div class="dk g4">4</div><div class="dk g4">4</div><div class="dk g4">4</div><div class="dk g5">5</div><div class="dk g5">5</div><div class="dk g5">5</div><div class="dk g5">5</div>
+  <div class="dk g6">6</div><div class="dk g6">6</div><div class="dk g6">6</div><div class="dk g6">6</div><div class="dk g7">7</div><div class="dk g7">7</div><div class="dk g7">7</div><div class="dk g7">7</div>
+  <div class="dk g0">8</div><div class="dk g0">8</div><div class="dk g0">8</div><div class="dk g0">8</div><div class="dk g1">9</div><div class="dk g1">9</div><div class="dk g1">9</div><div class="dk g1">9</div>
+  <div class="dk g2">10</div><div class="dk g2">10</div><div class="dk g2">10</div><div class="dk g2">10</div><div class="dk g3">11</div><div class="dk g3">11</div><div class="dk g3">11</div><div class="dk g3">11</div>
+  <div class="dk g4">12</div><div class="dk g4">12</div><div class="dk g4">12</div><div class="dk g4">12</div><div class="dk g5">13</div><div class="dk g5">13</div><div class="dk g5">13</div><div class="dk g5">13</div>
+  <div class="dk g6">14</div><div class="dk g6">14</div><div class="dk g6">14</div><div class="dk g6">14</div><div class="dk g7">15</div><div class="dk g7">15</div><div class="dk g7">15</div><div class="dk g7">15</div>
+  <div class="dk g0">16</div><div class="dk g0">16</div><div class="dk g0">16</div><div class="dk g0">16</div><div class="dk g1">17</div><div class="dk g1">17</div><div class="dk g1">17</div><div class="dk g1">17</div>
+  <div class="dk g2">18</div><div class="dk g2">18</div><div class="dk g2">18</div><div class="dk g2">18</div><div class="dk g3">19</div><div class="dk g3">19</div><div class="dk g3">19</div><div class="dk g3">19</div>
+  <div class="dk g4">20</div><div class="dk g4">20</div><div class="dk g4">20</div><div class="dk g4">20</div><div class="dk g5">21</div><div class="dk g5">21</div><div class="dk g5">21</div><div class="dk g5">21</div>
+  <div class="dk g6">22</div><div class="dk g6">22</div><div class="dk g6">22</div><div class="dk g6">22</div><div class="dk g7">23</div><div class="dk g7">23</div><div class="dk g7">23</div><div class="dk g7">23</div>
+  <div class="dk g0">24</div><div class="dk g0">24</div><div class="dk g0">24</div><div class="dk g0">24</div><div class="dk g1">25</div><div class="dk g1">25</div><div class="dk g1">25</div><div class="dk g1">25</div>
+  <div class="dk g2">26</div><div class="dk g2">26</div><div class="dk g2">26</div><div class="dk g2">26</div><div class="dk g3">27</div><div class="dk g3">27</div><div class="dk g3">27</div><div class="dk g3">27</div>
+  <div class="dk g4">28</div><div class="dk g4">28</div><div class="dk g4">28</div><div class="dk g4">28</div><div class="dk g5">29</div><div class="dk g5">29</div><div class="dk g5">29</div><div class="dk g5">29</div>
+  <div class="dk g6">30</div><div class="dk g6">30</div><div class="dk g6">30</div><div class="dk g6">30</div><div class="dk g7">31</div><div class="dk g7">31</div><div class="dk g7">31</div><div class="dk g7">31</div>
+</div>
+<p class="cap">线程↔格子的公式就是代码里那两行:<code>r = lane&gt;&gt;1</code>(每行 2 个线程),<code>c = (lane&amp;1)*4</code>(每个线程拿 4 个连续列)。</p>
+<p class="cap">⚠️ <b>注意代码里有两个 <code>c</code> 撞名</b>:整型 <code>int c = (lane&amp;1)*4</code>(起始列,用在 <code>B[k*8+c+j]</code>)
+和数组 <code>float c[4]</code>(累加器,初始 0)——<b>不是同一个东西</b>。读别人 kernel 时这是最常见的坑。</p>
+
+<p><b>lane 0 在算什么</b>——它的 4 个输出,每个都是"A 第 0 行"和"B 某一列"的<b>点积</b>;
+关键是 <b>A 的第 0 行被 4 个输出复用</b>,所以一次循环 <code>k</code> 能同时喂 4 条 FMA:</p>
+<table>
+  <tr><th>A 第 0 行(沿 k=0..15)</th><th></th><th>B 的第 n 列(沿 k=0..15)</th><th></th><th>输出</th></tr>
+  <tr><td><code>A[0][0..15]</code></td><td>×</td><td><code>B[0..15][0]</code></td><td>→</td><td><code>D[0][0]</code> (n=0)</td></tr>
+  <tr><td><code>A[0][0..15]</code></td><td>×</td><td><code>B[0..15][1]</code></td><td>→</td><td><code>D[0][1]</code> (n=1)</td></tr>
+  <tr><td><code>A[0][0..15]</code></td><td>×</td><td><code>B[0..15][2]</code></td><td>→</td><td><code>D[0][2]</code> (n=2)</td></tr>
+  <tr><td><code>A[0][0..15]</code></td><td>×</td><td><code>B[0..15][3]</code></td><td>→</td><td><code>D[0][3]</code> (n=3)</td></tr>
+</table>
+<pre class="geom"><span class="annot">// 等价循环:一次 k,同时更新 4 个输出(4 条 FMA)</span>
+for (k = 0; k &lt; 16; k++) {
+    d[0] += A[0][k] * B[k][0];
+    d[1] += A[0][k] * B[k][1];
+    d[2] += A[0][k] * B[k][2];
+    d[3] += A[0][k] * B[k][3];
+}</pre>
+<p class="cap">顺便对比一个有意思的点:写法 A 里 lane 0 拿 <b>D[0][0..3](同一行的 4 个连续输出)</b>;
+等会儿 Tensor Core 版里 lane 0 拿的是 <b>D[0][0]、D[0][1]、D[8][0]、D[8][1](2 行 × 2 列)</b>。
+两种切法不同——naive 版随便切,Tensor Core 版的切法由 mma fragment 布局<b>强制规定</b>。</p>
+
+<h3>写法 B:Tensor Core——数据装进寄存器后,一条指令算完</h3>
+<pre><code><span class="annot">// 同一个 D[16×8] = A[16×16] × B[16×8],但交给专用矩阵引擎:</span>
+<span class="annot">// ① 32 个线程先把 A/B 的 fragment 装进各自的寄存器(第 3 节逐行讲)</span>
+<span class="annot">// ② 一条 mma.sync 指令,硬件把 16×8×16 的乘加一次性做完</span>
+asm volatile(
+    "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+    "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+    <span class="annot">//  │D fragment(4个f32)│   │A(4个寄存器)│  │B(2个)│  │C(4个)│</span>
+    : "=f"(d[0]),"=f"(d[1]),"=f"(d[2]),"=f"(d[3])
+    : "r"(a[0]),"r"(a[1]),"r"(a[2]),"r"(a[3]),
+      "r"(b[0]),"r"(b[1]), "f"(c[0]),"f"(c[1]),"f"(c[2]),"f"(c[3]));</code></pre>
+
+<h3>硬件视角:一条 mma 指令到底发生了什么</h3>
+
+<p><b>先分清两件事:「发射」和「算完」不是一回事。</b>warp scheduler 每拍发一条指令,
+这是"发射"。FFMA 发射一次、CUDA core 一拍出结果;但 <code>mma</code> 发射一次,
+<b>要好几拍才出结果</b>——因为它的活多得多。所以"一条指令"说的是
+<b>指令流里只占一个位置(只发射一次)</b>,不是"一个周期干完"。</p>
+
+<p><b>SM 里的执行单元是分家的</b>——指令由谁执行,取决于它是什么指令;它们共用同一个 warp scheduler:</p>
+<pre class="geom">
+         warp scheduler(取指+发射,每拍一条,32 lane 的指令流)
+                       │
+        ┌──────────────┴──────────────┐
+        ▼                             ▼
+  [ FP32 CUDA Core 管线 ]       [ Tensor Core 阵列(HMMA) ]
+   处理 FFMA(标量乘加)            处理 mma.sync(整块矩阵乘加)
+   1 次发射 = 32 lane × 1 FMA    1 次发射 = 16×8×16 = 2048 MAC
+             = 32 MAC                       = 2048 MAC(多拍完成)
+</pre>
+
+<p><b>Tensor Core 阵列内部:K 的循环在硬件里,不在指令流里。</b></p>
+
+<p>画出来看。下面这张图就是 m16n8k16 的阵列:<b>16 行 × 8 列 = 128 个乘加单元(cell)</b>,
+每个 cell 负责 D 的一个元素。<b>A 第 r 行从左侧喂进来(同时喂给它那一行全部 8 个 cell),
+B 第 n 列从顶部喂下来(同时喂给它那一列全部 16 个 cell)</b>——交点处的 cell 把它们沿 K 逐项相乘累加:</p>
+
+<div class="tcwrap">
+  <div class="tchead"></div>
+  <div class="tchead">B[·][0]</div><div class="tchead">B[·][1]</div><div class="tchead">B[·][2]</div><div class="tchead">B[·][3]</div>
+  <div class="tchead">B[·][4]</div><div class="tchead">B[·][5]</div><div class="tchead">B[·][6]</div><div class="tchead">B[·][7]</div>
+
+  <div class="tclabel">A[0][·]→</div><div class="tccell hl">D0,0</div><div class="tccell">D0,1</div><div class="tccell">D0,2</div><div class="tccell">D0,3</div><div class="tccell">D0,4</div><div class="tccell">D0,5</div><div class="tccell">D0,6</div><div class="tccell">D0,7</div>
+  <div class="tclabel">A[1][·]→</div><div class="tccell">D1,0</div><div class="tccell">D1,1</div><div class="tccell">D1,2</div><div class="tccell">D1,3</div><div class="tccell">D1,4</div><div class="tccell">D1,5</div><div class="tccell">D1,6</div><div class="tccell">D1,7</div>
+  <div class="tclabel">A[2][·]→</div><div class="tccell">D2,0</div><div class="tccell">D2,1</div><div class="tccell">D2,2</div><div class="tccell">D2,3</div><div class="tccell">D2,4</div><div class="tccell">D2,5</div><div class="tccell">D2,6</div><div class="tccell">D2,7</div>
+  <div class="tclabel">A[3][·]→</div><div class="tccell">D3,0</div><div class="tccell">D3,1</div><div class="tccell">D3,2</div><div class="tccell">D3,3</div><div class="tccell">D3,4</div><div class="tccell">D3,5</div><div class="tccell">D3,6</div><div class="tccell">D3,7</div>
+  <div class="tclabel">A[4][·]→</div><div class="tccell">D4,0</div><div class="tccell">D4,1</div><div class="tccell">D4,2</div><div class="tccell">D4,3</div><div class="tccell">D4,4</div><div class="tccell">D4,5</div><div class="tccell">D4,6</div><div class="tccell">D4,7</div>
+  <div class="tclabel">A[5][·]→</div><div class="tccell">D5,0</div><div class="tccell">D5,1</div><div class="tccell">D5,2</div><div class="tccell">D5,3</div><div class="tccell">D5,4</div><div class="tccell">D5,5</div><div class="tccell">D5,6</div><div class="tccell">D5,7</div>
+  <div class="tclabel">A[6][·]→</div><div class="tccell">D6,0</div><div class="tccell">D6,1</div><div class="tccell">D6,2</div><div class="tccell">D6,3</div><div class="tccell">D6,4</div><div class="tccell">D6,5</div><div class="tccell">D6,6</div><div class="tccell">D6,7</div>
+  <div class="tclabel">A[7][·]→</div><div class="tccell">D7,0</div><div class="tccell">D7,1</div><div class="tccell">D7,2</div><div class="tccell">D7,3</div><div class="tccell">D7,4</div><div class="tccell">D7,5</div><div class="tccell">D7,6</div><div class="tccell">D7,7</div>
+  <div class="tclabel">A[8][·]→</div><div class="tccell">D8,0</div><div class="tccell">D8,1</div><div class="tccell">D8,2</div><div class="tccell">D8,3</div><div class="tccell">D8,4</div><div class="tccell">D8,5</div><div class="tccell">D8,6</div><div class="tccell">D8,7</div>
+  <div class="tclabel">A[9][·]→</div><div class="tccell">D9,0</div><div class="tccell">D9,1</div><div class="tccell">D9,2</div><div class="tccell">D9,3</div><div class="tccell">D9,4</div><div class="tccell">D9,5</div><div class="tccell">D9,6</div><div class="tccell">D9,7</div>
+  <div class="tclabel">A[10][·]→</div><div class="tccell">D10,0</div><div class="tccell">D10,1</div><div class="tccell">D10,2</div><div class="tccell">D10,3</div><div class="tccell">D10,4</div><div class="tccell">D10,5</div><div class="tccell">D10,6</div><div class="tccell">D10,7</div>
+  <div class="tclabel">A[11][·]→</div><div class="tccell">D11,0</div><div class="tccell">D11,1</div><div class="tccell">D11,2</div><div class="tccell">D11,3</div><div class="tccell">D11,4</div><div class="tccell">D11,5</div><div class="tccell">D11,6</div><div class="tccell">D11,7</div>
+  <div class="tclabel">A[12][·]→</div><div class="tccell">D12,0</div><div class="tccell">D12,1</div><div class="tccell">D12,2</div><div class="tccell">D12,3</div><div class="tccell">D12,4</div><div class="tccell">D12,5</div><div class="tccell">D12,6</div><div class="tccell">D12,7</div>
+  <div class="tclabel">A[13][·]→</div><div class="tccell">D13,0</div><div class="tccell">D13,1</div><div class="tccell">D13,2</div><div class="tccell">D13,3</div><div class="tccell">D13,4</div><div class="tccell">D13,5</div><div class="tccell">D13,6</div><div class="tccell">D13,7</div>
+  <div class="tclabel">A[14][·]→</div><div class="tccell">D14,0</div><div class="tccell">D14,1</div><div class="tccell">D14,2</div><div class="tccell">D14,3</div><div class="tccell">D14,4</div><div class="tccell">D14,5</div><div class="tccell">D14,6</div><div class="tccell">D14,7</div>
+  <div class="tclabel">A[15][·]→</div><div class="tccell">D15,0</div><div class="tccell">D15,1</div><div class="tccell">D15,2</div><div class="tccell">D15,3</div><div class="tccell">D15,4</div><div class="tccell">D15,5</div><div class="tccell">D15,6</div><div class="tccell">D15,7</div>
+</div>
+<p class="cap">橙色框 = 下面要放大看的一个 cell。每个 cell 内是它负责算出的输出坐标 <code>D[r][n]</code>。</p>
+
+<div class="keybox"><b>一次 k 步骤 = 全阵列同时做</b>:同一拍里,128 个 cell 各算一个乘积并累加
+(<code>cell(r,n): D[r][n] += A[r][k]·B[k][n]</code>)。<b>概念上</b> k 走 16 步(逻辑 16 次累加),
+<b>但物理拍数 ≠ 16</b>:阵列一次能并行吞几个 k(比如 8 个),16 个 k 就只分 2 段;
+再叠加流水重叠(段 0 算 k=0..7 时段 1 已开始 k=8..15),总延迟只有几拍到十几拍。
+指令流里没有循环,只有一条 mma.sync。</div>
+
+<p><b>放大 D[0][0] 这一个 cell</b>,看它怎么沿 K 累加 16 次。数值用的就是代码里那套公式
+(<code>A[r][k]=(r+k)%5-2</code>, <code>B[k][n]=(k*n)%3-1</code>),最后一列正好等于程序输出:</p>
+<table class="kacc">
+  <tr><th>k</th><th>A[0][k]</th><th>B[k][0]</th><th>A×B</th><th>累加和</th></tr>
+  <tr><td>0</td><td>-2</td><td>-1</td><td>2</td><td>2</td></tr>
+  <tr><td>1</td><td>-1</td><td>-1</td><td>1</td><td>3</td></tr>
+  <tr><td>2</td><td>0</td><td>-1</td><td>0</td><td>3</td></tr>
+  <tr><td>3</td><td>1</td><td>-1</td><td>-1</td><td>2</td></tr>
+  <tr><td>4</td><td>2</td><td>-1</td><td>-2</td><td>0</td></tr>
+  <tr><td>5</td><td>-2</td><td>-1</td><td>2</td><td>2</td></tr>
+  <tr><td>6</td><td>-1</td><td>-1</td><td>1</td><td>3</td></tr>
+  <tr><td>7</td><td>0</td><td>-1</td><td>0</td><td>3</td></tr>
+  <tr><td>8</td><td>1</td><td>-1</td><td>-1</td><td>2</td></tr>
+  <tr><td>9</td><td>2</td><td>-1</td><td>-2</td><td>0</td></tr>
+  <tr><td>10</td><td>-2</td><td>-1</td><td>2</td><td>2</td></tr>
+  <tr><td>11</td><td>-1</td><td>-1</td><td>1</td><td>3</td></tr>
+  <tr><td>12</td><td>0</td><td>-1</td><td>0</td><td>3</td></tr>
+  <tr><td>13</td><td>1</td><td>-1</td><td>-1</td><td>2</td></tr>
+  <tr><td>14</td><td>2</td><td>-1</td><td>-2</td><td>0</td></tr>
+  <tr><td>15</td><td>-2</td><td>-1</td><td>2</td><td>2</td></tr>
+</table>
+<p class="cap">最终 <code>D[0][0] = 2</code>,和程序输出一致。<b>128 个 cell 同时在各自做这样一套 16 步累加</b>——这就是"一次发射、多拍并行算完"。</p>
+
+<p><b>计数重新对齐(2048 不是循环次数)</b>:</p>
+<table>
+  <tr><th></th><th>指令条数</th><th>每次发射做多少 MAC</th><th>总 MAC</th></tr>
+  <tr><td>naive(CUDA Core)</td><td><b>64</b> 条 FFMA(16k×4j 循环)</td><td>32(整个 warp)</td><td>2048</td></tr>
+  <tr><td>Tensor Core</td><td><b>1</b> 条 mma.sync</td><td>2048</td><td>2048</td></tr>
+</table>
+<p>每次发射:FFMA 出 32 MAC,<code>mma</code> 出 2048 → <b>单指令吞吐 64×</b>(省掉 63 次取指/发射)。
+但 mma 要多拍完成,所以每周期峰值没那么夸张:5090 的 FP16 tensor dense 209.5 vs FP32 104.8 TFLOPS ≈ 2×,FP8/FP4 更高。
+"64× 少发射 + 每周期更高吞吐 + 多周期延迟被大量 resident warp 交错隐藏" = 完整加速来源。</p>
+
+<h3>快在哪?——三件事,从指令到硬件</h3>
+<table>
+  <tr><th>维度</th><th>CUDA Core</th><th>Tensor Core</th></tr>
+  <tr><td><b>指令条数</b></td><td>2048 条 FFMA(每次取指/译码/调度都有开销)</td><td><b>1 条</b> mma.sync</td></tr>
+  <tr><td><b>执行单元</b></td><td>SM 里的 FP32 CUDA Core(每个周期一个 FMA/lane)</td><td>SM 里<b>专用矩阵引擎</b>,内部并行乘加阵列,一次吞进整个 fragment</td></tr>
+  <tr><td><b>峰值</b>(5090)</td><td>FP32 = 104.8 TFLOPS</td><td>FP16 dense = <b>209.5</b> TFLOPS;FP8 / FP4 再翻几倍</td></tr>
+</table>
+
+<div class="keybox"><b>"代码层面看不出快在哪?"——对,这不是错觉。</b>
+单看一条 <code>mma.sync</code> 的源码,确实"看不出快"。因为快是<b>硬件属性</b>:
+它由矩阵引擎的<b>每 SM 每周期 FLOP</b> 决定——这个数字写在 datasheet 里,
+这正是<b>题 0.2 让你推导峰值</b>的意义:峰值 = "快多少"的量化。
+代码层面你能看到的只有一个信号:<b>指令条数(1 vs 2048)</b>。</div>
+
+<h3>为什么必须是一个 warp?</h3>
+<p><code>mma.sync</code> 是<b> warp 级协作指令</b>:32 个 lane 必须同时执行这条指令。
+因为 fragment 本来就<b>分散在 32 个人的寄存器里</b>——A 的 256 个元素,一人 8 个,
+都在各自的 <code>a[4]</code> 里。硬件矩阵引擎要的是<b>全 warp 的寄存器拼在一起</b>。
+一个 lane 单独执行 mma,行为未定义。这就是 GPU 的 SIMT 模型:以 warp(32 线程)为调度与执行单位。</p>
+
+<div class="keybox"><b>SIMT 执行模型:一条指令,32 个 lane 同一拍执行,各取各的数据</b>
+<br>warp scheduler 每一拍发<b>一条</b>指令,广播给 32 个 lane 同时执行。不是"4 波线程",
+而是"同一份指令流,所有 lane 在同一拍做同样的事,只是各自的寄存器/地址不同"。
+<br><b>"不同"在哪</b>:基址指针(A/B/D)全 warp 共享;不同之处是<b>偏移</b>——每个 lane
+用自己推导的 <code>r</code>/<code>c</code>(由 lane 号算出)得到不同地址。
+<br><b>拍数 = 指令条数</b>,由循环决定:naive 版 <code>16 k × 4 j = 64</code> 条 FMA
+(外加地址计算/取数/写回),是几十到上百拍,不是固定的"4 拍"。
+"4" 是每线程的<b>输出个数</b>(<code>d[0..3]</code>),不是执行波数。</div>
+
+<!-- ================= 1. 词汇表 ================= -->
+<h2 id="s1">1 · 词汇表(先扫一遍,后面全靠它)</h2>
+
+<details><summary><code>__half</code> —— 16 位浮点数(fp16)</summary>
+<p>一个 fp16 = 2 字节。比 float(4 字节)省一半显存与带宽。这题的输入故意用<b>小整数</b>,
+保证转成 fp16 后<b>精确</b>,所以 CPU 对拍可以严格相等。</p>
+</details>
+
+<details><summary><code>__half2</code> —— 两个 fp16 打包成一个 32 位量</summary>
+<p>GPU 寄存器是 32 位(<code>b32</code>)。一个寄存器装 1 个 float,或装 <b>2 个 fp16</b>。
+<code>__half2</code> 就是这个"2 个打包的 fp16"。好处:一次寄存器操作处理 2 个元素。</p>
+</details>
+
+<details><summary><code>__halves2half2(a, b)</code> —— 把两个 __half 打成一个 __half2</summary>
+<p>纯打包函数,不做任何数学运算。<code>__halves2half2(A[x], A[x+1])</code> = 把内存里相邻的两个 fp16
+塞进同一个 32 位寄存器。对应地,拆包用 <code>__low2half</code> / <code>__high2half</code>。</p>
+</details>
+
+<details><summary><code>unsigned a[4]</code> —— 这是"per-thread fragment",不是完整 fragment</summary>
+<p><code>unsigned</code> 在这里的意思是"一个 32 位寄存器"(b32)。<code>a[4]</code> = 4 个寄存器。
+后面用 <code>reinterpret_cast&lt;__half2*&gt;(a)</code> 把"4 个 b32"重新看成"4 个 __half2",
+于是 4 个寄存器 = 4×2 = <b>8 个 fp16</b> = <b>本线程(1/32)</b> 持有的 A 的元素。
+<b>这不是完整的 fragment</b>——完整 fragment 是整块 16×16 矩阵,见下一条。</p>
+</details>
+
+<details><summary><code>fragment</code> —— "矩阵的一块",但它是横跨整个 warp 的概念</summary>
+<p><code>mma m16n8k16</code> 的 <b>A fragment = 完整的 A:16×16</b>(256 个元素)。
+"fragment" 的本意就是"这块矩阵被<b>切碎</b>成 32 份,分别放进 32 个 lane 的寄存器"。它有两层含义:</p>
+<ul>
+  <li><b>整个 fragment</b> = 16×16 整块 = 32 个 lane 的寄存器拼在一起 —— 这是 mma 指令的语义单元;</li>
+  <li><b>per-thread fragment</b> = 单个 lane 手里那份 = <code>a[4]</code>(4 个 b32 = 8 个 fp16)。</li>
+</ul>
+<p>这就是为什么 mma 必须全 warp 一起执行:硬件矩阵引擎要把 32 个 lane 的寄存器<b>同时收走、拼回整块</b>,才算那一次乘加。
+单个 <code>a[4]</code> 只是整块的 1/32。你在代码里只能看到自己那 4 个寄存器,所以容易误以为 fragment 就是寄存器——其实整块矩阵才是 fragment。</p>
+</details>
+
+<details><summary><code>lane</code> / <code>warp</code> —— 线程与 32 线程组</summary>
+<p>warp = 32 个线程,是 GPU 执行与调度的最小单位(一个 warp 同时执行同一条指令)。
+warp 里第 <code>lane</code> 号线程用 <code>threadIdx.x</code> 得到,0..31。</p>
+</details>
+
+<details><summary>行主序(row-major) —— 二维数组在内存里的排法</summary>
+<p>行主序:先放第 0 行所有元素,再放第 1 行…… 因此 <code>arr[r][c]</code> 的内存下标 =
+<code>r × 行步长 + c</code>,其中<b>行步长 = 每行元素数 = 列数</b>。
+C/C++ 的多维数组、以及这题的 A/B/D 全是行主序。⚠️ 行步长的单位是<b>元素数</b>,不是字节。</p>
+</details>
+
+<details><summary><code>mma.sync...row.col</code> 里的 row / col —— 与内存布局不是一回事</summary>
+<p><code>.row.col</code> 是 <b>fragment 布局约定</b>,描述"每个线程的寄存器里按什么形状摆元素"。
+它跟内存里数组是行主序还是列主序<b>没有直接关系</b>——内存永远是行主序,这是另一个维度。
+这个最容易混淆,第 2.4 节单独讲。</p>
+</details>
+
+<details><summary>元素下标 vs 字节偏移 —— 这题里最重要的一个区分</summary>
+<p>这题的代码里<b>所有偏移都是"元素数",没有任何一个是字节</b>。
+字节偏移 = 元素下标 × 类型大小(编译器按指针类型自动算,代码里看不到):
+<code>__half</code> ×2 字节,<code>float</code> ×4 字节。</p>
+</details>
+
+<details><summary><code>group</code> / <code>tig</code> —— lane 的两种拆法</summary>
+<p>代码开头把 lane 拆成两半:<code>group = lane&gt;&gt;2</code>(0..7,行方向的分组),
+<code>tig = lane&amp;3</code>(0..3,组内第几个线程)。这是从 fragment 布局反推出来的编号方式,
+后面整个下标公式都挂在这两个数上。</p>
+</details>
+
+<!-- ================= 2. 核心直觉图 ================= -->
+<h2 id="s2">2 · 核心直觉图:一个 warp 把矩阵切成 32 块</h2>
+
+<h3>2.1 三张矩阵,每一张都被 32 个线程瓜分</h3>
+<p>下面每张小方格 = <b>一个线程(lane)持有的一块 fragment</b>,格子里的数字就是 lane 号,
+颜色 = <code>group</code>(同组同色)。<b>三张地图的结构完全一样(都是 0..31 的顺序),变的只是每一块内部形状。</b></p>
+
+<div class="maps">
+  <div class="mapbox">
+    <div class="mtitle"><span class="tag a">A</span>A:16×16</div>
+    <div class="mdim">行步长 16 · 每块 = 行{g,g+8} × 列{2t,2t+1,2t+8,2t+9}(2行×4列,4列<b>不连续</b>)</div>
+    <div class="map">
+      <div class="blk g0">0<small>g0,t0</small></div><div class="blk g0">1<small>g0,t1</small></div><div class="blk g0">2<small>g0,t2</small></div><div class="blk g0">3<small>g0,t3</small></div>
+      <div class="blk g1">4<small>g1,t0</small></div><div class="blk g1">5<small>g1,t1</small></div><div class="blk g1">6<small>g1,t2</small></div><div class="blk g1">7<small>g1,t3</small></div>
+      <div class="blk g2">8<small>g2,t0</small></div><div class="blk g2">9<small>g2,t1</small></div><div class="blk g2">10<small>g2,t2</small></div><div class="blk g2">11<small>g2,t3</small></div>
+      <div class="blk g3">12<small>g3,t0</small></div><div class="blk g3">13<small>g3,t1</small></div><div class="blk g3">14<small>g3,t2</small></div><div class="blk g3">15<small>g3,t3</small></div>
+      <div class="blk g4">16<small>g4,t0</small></div><div class="blk g4">17<small>g4,t1</small></div><div class="blk g4">18<small>g4,t2</small></div><div class="blk g4">19<small>g4,t3</small></div>
+      <div class="blk g5">20<small>g5,t0</small></div><div class="blk g5">21<small>g5,t1</small></div><div class="blk g5">22<small>g5,t2</small></div><div class="blk g5">23<small>g5,t3</small></div>
+      <div class="blk g6">24<small>g6,t0</small></div><div class="blk g6">25<small>g6,t1</small></div><div class="blk g6">26<small>g6,t2</small></div><div class="blk g6">27<small>g6,t3</small></div>
+      <div class="blk g7">28<small>g7,t0</small></div><div class="blk g7">29<small>g7,t1</small></div><div class="blk g7">30<small>g7,t2</small></div><div class="blk g7">31<small>g7,t3</small></div>
+    </div>
+    <div class="cap">lane = g×4 + t。行组 g 负责 <code>行{g, g+8}</code>;列组 t 负责 <code>列{2t,2t+1,2t+8,2t+9}</code>。</div>
+  </div>
+
+  <div class="mapbox">
+    <div class="mtitle"><span class="tag b">B</span>B:16×8</div>
+    <div class="mdim">行步长 8 · 每块 = 行(k){2t,2t+1,2t+8,2t+9} × 列(n)=g(4行×1列)</div>
+    <div class="map">
+      <div class="blk g0">0<small>n0,kt0</small></div><div class="blk g0">1<small>n0,kt1</small></div><div class="blk g0">2<small>n0,kt2</small></div><div class="blk g0">3<small>n0,kt3</small></div>
+      <div class="blk g1">4<small>n1,kt0</small></div><div class="blk g1">5<small>n1,kt1</small></div><div class="blk g1">6<small>n1,kt2</small></div><div class="blk g1">7<small>n1,kt3</small></div>
+      <div class="blk g2">8<small>n2,kt0</small></div><div class="blk g2">9<small>n2,kt1</small></div><div class="blk g2">10<small>n2,kt2</small></div><div class="blk g2">11<small>n2,kt3</small></div>
+      <div class="blk g3">12<small>n3,kt0</small></div><div class="blk g3">13<small>n3,kt1</small></div><div class="blk g3">14<small>n3,kt2</small></div><div class="blk g3">15<small>n3,kt3</small></div>
+      <div class="blk g4">16<small>n4,kt0</small></div><div class="blk g4">17<small>n4,kt1</small></div><div class="blk g4">18<small>n4,kt2</small></div><div class="blk g4">19<small>n4,kt3</small></div>
+      <div class="blk g5">20<small>n5,kt0</small></div><div class="blk g5">21<small>n5,kt1</small></div><div class="blk g5">22<small>n5,kt2</small></div><div class="blk g5">23<small>n5,kt3</small></div>
+      <div class="blk g6">24<small>n6,kt0</small></div><div class="blk g6">25<small>n6,kt1</small></div><div class="blk g6">26<small>n6,kt2</small></div><div class="blk g6">27<small>n6,kt3</small></div>
+      <div class="blk g7">28<small>n7,kt0</small></div><div class="blk g7">29<small>n7,kt1</small></div><div class="blk g7">30<small>n7,kt2</small></div><div class="blk g7">31<small>n7,kt3</small></div>
+    </div>
+    <div class="cap">lane = n×4 + t。列组 n=g 固定一个 <b>输出列</b>;k 组 t 沿 <b>K 方向</b>取 4 个值 —— 这就是 <code>.col</code> 布局。</div>
+  </div>
+
+  <div class="mapbox">
+    <div class="mtitle"><span class="tag d">D</span>D:16×8</div>
+    <div class="mdim">行步长 8 · 每块 = 行{g,g+8} × 列{2t,2t+1}(2行×2列)</div>
+    <div class="map">
+      <div class="blk g0">0<small>g0,t0</small></div><div class="blk g0">1<small>g0,t1</small></div><div class="blk g0">2<small>g0,t2</small></div><div class="blk g0">3<small>g0,t3</small></div>
+      <div class="blk g1">4<small>g1,t0</small></div><div class="blk g1">5<small>g1,t1</small></div><div class="blk g1">6<small>g1,t2</small></div><div class="blk g1">7<small>g1,t3</small></div>
+      <div class="blk g2">8<small>g2,t0</small></div><div class="blk g2">9<small>g2,t1</small></div><div class="blk g2">10<small>g2,t2</small></div><div class="blk g2">11<small>g2,t3</small></div>
+      <div class="blk g3">12<small>g3,t0</small></div><div class="blk g3">13<small>g3,t1</small></div><div class="blk g3">14<small>g3,t2</small></div><div class="blk g3">15<small>g3,t3</small></div>
+      <div class="blk g4">16<small>g4,t0</small></div><div class="blk g4">17<small>g4,t1</small></div><div class="blk g4">18<small>g4,t2</small></div><div class="blk g4">19<small>g4,t3</small></div>
+      <div class="blk g5">20<small>g5,t0</small></div><div class="blk g5">21<small>g5,t1</small></div><div class="blk g5">22<small>g5,t2</small></div><div class="blk g5">23<small>g5,t3</small></div>
+      <div class="blk g6">24<small>g6,t0</small></div><div class="blk g6">25<small>g6,t1</small></div><div class="blk g6">26<small>g6,t2</small></div><div class="blk g6">27<small>g6,t3</small></div>
+      <div class="blk g7">28<small>g7,t0</small></div><div class="blk g7">29<small>g7,t1</small></div><div class="blk g7">30<small>g7,t2</small></div><div class="blk g7">31<small>g7,t3</small></div>
+    </div>
+    <div class="cap">lane = g×4 + t。每个线程写回 4 个输出,就是 mma 吐出的 d[4]。</div>
+  </div>
+</div>
+
+<div class="legend">
+  <span>group:</span>
+  <span class="sw g0"></span>0<span class="sw g1"></span>1<span class="sw g2"></span>2<span class="sw g3"></span>3
+  <span class="sw g4"></span>4<span class="sw g5"></span>5<span class="sw g6"></span>6<span class="sw g7"></span>7
+</div>
+
+<div class="keybox"><b>再钉一遍"fragment"这个词</b>:上面三张地图<b>每一张本身就是 mma 的一个整个 fragment</b>
+(A 的 16×16、B 的 16×8、D 的 16×8);地图里<b>每一个小格子</b>是那个 lane 的
+<b>per-thread fragment</b>(就是它的 <code>a[4]</code> / <code>b[2]</code> / <code>d[4]</code>)。
+所以 fragment 不是 4 个寄存器,而是"整块矩阵被切碎在 32 个 lane 的寄存器里";4 个寄存器只是你手里的 1/32。</div>
+
+<h3>2.2 放大一块:lane 0 的全部 fragment(对着寄存器看)</h3>
+<p>lane 0(<code>group=0, tig=0</code>)持有下面这些寄存器。每个 <code>a[i]</code>/<code>b[i]</code> 是一个 b32 寄存器,
+装 2 个 fp16;每个 <code>d[i]</code> 是一个 f32。数值按代码里的公式填好,跑程序可以验证。</p>
+
+<div class="zoom">
+<pre><span class="annot">// lane 0:group=0, tig=0</span>
+<span class="annot">// A fragment —— unsigned a[4] = 4 个寄存器 = 8 个 fp16</span>
+a[0] = A[0*16+0], A[0*16+1]      <span class="annot">→ (行0,  列0,1)   = -2, -1</span>
+a[1] = A[8*16+0], A[8*16+1]      <span class="annot">→ (行8,  列0,1)   =  1,  2</span>
+a[2] = A[0*16+8], A[0*16+9]      <span class="annot">→ (行0,  列8,9)   =  1,  2</span>
+a[3] = A[8*16+8], A[8*16+9]      <span class="annot">→ (行8,  列8,9)   = -1,  0</span>
+
+<span class="annot">// B fragment —— unsigned b[2] = 2 个寄存器 = 4 个 fp16</span>
+b[0] = B[0*8+0], B[1*8+0]        <span class="annot">→ (k=0,1; n=0)    = -1, -1</span>
+b[1] = B[8*8+0], B[9*8+0]        <span class="annot">→ (k=8,9; n=0)    = -1, -1</span>
+
+<span class="annot">// D fragment —— float d[4] = 4 个 f32(输出)</span>
+d[0] → D[0*8+0]  d[1] → D[0*8+1]   <span class="annot">→ (行0, 列0,1)</span>
+d[2] → D[8*8+0]  d[3] → D[8*8+1]   <span class="annot">→ (行8, 列0,1)</span></pre>
+</div>
+
+<p>注意一个<b>看似反直觉、实则关键</b>的点:A 的 4 个"列"在内存里<b>不是连续的</b>
+(<code>2t,2t+1</code> 和 <code>2t+8,2t+9</code> 隔着 8 个元素)。所以代码里才有 <code>+8</code> 那一下。
+同理,16 行切成 <code>group</code> 和 <code>group+8</code> 两半,所以 a[0]/a[1] 是"下半行",a[2]/a[3] 才是"上半行"。</p>
+
+<h3>2.3 三条"一通百通"的规律</h3>
+<div class="keybox">
+  ① <b>所有下标都是【元素数】,不是字节</b>。行步长 = 列数:A 有 16 列 → 步长 16;B/D 有 8 列 → 步长 8。
+  字节偏移 = 元素下标 × 类型大小,编译器按指针类型(<code>__half</code>×2, <code>float</code>×4)隐式算,代码里看不到。
+  <br><br>
+  ② <b>为什么列下标是 <code>2t, 2t+1</code></b>:<code>__half2</code> 一次读写 2 个相邻元素,所以按 2 打头、步进 2。
+  <br><br>
+  ③ <b>为什么有 <code>+8</code></b>:16 列 / 16 行都切成两半(0-7 和 8-15),同一组线程各占一半。
+  看 A 就知道:8 个元素 = 2 行 × 4 列,而这 4 列是"左半 2 个 + 右半 2 个"。
+</div>
+
+<h3>2.4 行主序 vs <code>.row.col</code> —— 两个"行列"别混</h3>
+<table>
+  <tr><th></th><th>回答的问题</th><th>这题里的答案</th></tr>
+  <tr><td><b>内存布局</b>(数组怎么排)</td><td>二维数组在内存里的顺序</td><td>全部行主序:<code>A[r*16+c]</code>,步长=列数</td></tr>
+  <tr><td><b>fragment 布局</b>(<code>.row.col</code>)</td><td>每个线程的寄存器里按什么形状摆元素</td><td><code>.row</code>(A 按行给组)、<code>.col</code>(B 按列给组)——查 PTX 文档的表</td></tr>
+</table>
+<p><b>内存是你自己 malloc 的,想怎么排怎么排(这题全行主序);</b>
+<code>.row.col</code> 是 <code>mma.sync</code> 指令的约定,决定硬件怎么读你的 fragment,不能乱选,
+否则结果就是乱的(这正是 1.2 修 bug 题的坑)。</p>
+
+<!-- ================= 3. 逐行拆解 ================= -->
+<h2 id="s3">3 · 逐行拆解 <code>01_first_mma.cu</code></h2>
+<p>对照第 2 节的图,一行一行对。先记住 <code>group = lane&gt;&gt;2</code>, <code>tig = lane&amp;3</code>。</p>
+
+<h3>3.1 装载 A fragment(8 个元素 → 4 个寄存器)</h3>
+<pre><code>unsigned a[4];                  <span class="annot">// 4 个 b32 寄存器 = 本线程的 8 个 A 元素</span>
+__half2* ah = reinterpret_cast&lt;__half2*&gt;(a);
+                                <span class="annot">// 重新解释:把 4 个 b32 看成 4 个 __half2(2×fp16)</span>
+ah[0] = __halves2half2(A[(group)*16 + tig*2],   A[(group)*16 + tig*2 + 1]);
+                                <span class="annot">// 行=group, 列=2t, 2t+1  → a[0]</span>
+ah[1] = __halves2half2(A[(group+8)*16 + tig*2], A[(group+8)*16 + tig*2 + 1]);
+                                <span class="annot">// 行=group+8, 列=2t, 2t+1 → a[1]</span>
+ah[2] = __halves2half2(A[(group)*16 + tig*2 + 8], A[(group)*16 + tig*2 + 9]);
+                                <span class="annot">// 行=group, 列=2t+8, 2t+9  → a[2]</span>
+ah[3] = __halves2half2(A[(group+8)*16 + tig*2 + 8], A[(group+8)*16 + tig*2 + 9]);
+                                <span class="annot">// 行=group+8, 列=2t+8, 2t+9 → a[3]</span></code></pre>
+<p><b>每个 magic number 的来源</b>(对着第 2 节图):</p>
+<ul>
+  <li><code>*16</code>:A 每行 16 个元素,<b>行步长</b>。</li>
+  <li><code>group</code> / <code>group+8</code>:16 行切成两半,线程负责第 <code>group</code> 和第 <code>group+8</code> 行。</li>
+  <li><code>tig*2</code> / <code>tig*2+8</code>:16 列切成四段 <code>2t, 2t+1, 2t+8, 2t+9</code>(×2 因为一次读 2 个,+8 是右半列)。</li>
+</ul>
+
+<h3>3.2 装载 B fragment(4 个元素 → 2 个寄存器)</h3>
+<pre><code>unsigned b[2];                  <span class="annot">// 2 个 b32 = 本线程的 4 个 B 元素</span>
+__half2* bh = reinterpret_cast&lt;__half2*&gt;(b);
+bh[0] = __halves2half2(B[(tig*2)*8 + group], B[(tig*2+1)*8 + group]);
+                                <span class="annot">// 行(k)=2t,2t+1, 列=group → b[0]</span>
+bh[1] = __halves2half2(B[(tig*2+8)*8 + group], B[(tig*2+9)*8 + group]);
+                                <span class="annot">// 行(k)=2t+8,2t+9, 列=group → b[1]</span></code></pre>
+<ul>
+  <li><code>*8</code>:B 每行 8 个元素,<b>行步长</b>。</li>
+  <li>B 是 <code>[k][n]</code> 的排法,线程拿的是<b>固定列 <code>n=group</code></b>,沿 k 方向 4 个值 —— 这就是 <code>.col</code> 的 fragment 布局。</li>
+</ul>
+
+<h3>3.3 一条 mma.sync + 写回 D</h3>
+<pre><code>float c[4] = {0.f,0.f,0.f,0.f}, d[4];   <span class="annot">// C 初始为 0;d 是 4 个输出寄存器(f32)</span>
+asm volatile(
+  "mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 "
+  "{%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%10,%11,%12,%13};\n"
+  : "=f"(d[0]),"=f"(d[1]),"=f"(d[2]),"=f"(d[3])       <span class="annot">// 输出:D</span>
+  : "r"(a[0]),"r"(a[1]),"r"(a[2]),"r"(a[3]),          <span class="annot">// 输入:A(4 regs)</span>
+    "r"(b[0]),"r"(b[1]),                              <span class="annot">// 输入:B(2 regs)</span>
+    "f"(c[0]),"f"(c[1]),"f"(c[2]),"f"(c[3]));         <span class="annot">// 输入:C(4 f32)</span>
+
+D[(group)*8 + tig*2] = d[0];          <span class="annot">// 行=group, 列=2t</span>
+D[(group)*8 + tig*2 + 1] = d[1];      <span class="annot">// 行=group, 列=2t+1</span>
+D[(group+8)*8 + tig*2] = d[2];        <span class="annot">// 行=group+8, 列=2t</span>
+D[(group+8)*8 + tig*2 + 1] = d[3];    <span class="annot">// 行=group+8, 列=2t+1</span></code></pre>
+<ul>
+  <li>指令串口述:<code>m16n8k16</code>(形状)、<code>.row.col</code>(A/B 的 fragment 布局)、
+  <code>f32.f16.f16.f32</code>(D/A/B/C 的类型)。</li>
+  <li>每条 mma 的运算:<code>D += A × B</code>,把上一轮 mma 的 D 继续累加(这就是"累积")。</li>
+  <li><code>*8</code> 是 D 的行步长;D 是 f32,每线程只写 2 列(<code>2t, 2t+1</code>),所以列下标没有 <code>+8</code>。</li>
+</ul>
+
+<!-- ================= 4. 编译链 ================= -->
+<h2 id="s4">4 · 编译链:PTX / SASS / fatbin / JIT</h2>
+<p>这题 0.1 让你"用不匹配的 ARCH 编译一次、记录现象、用 fatbin/JIT 解释"——先把这张链图记牢。</p>
+<pre>
+.cu(你能读的 C++ 源码)
+  │ nvcc
+  ▼
+PTX ── NVIDIA 的"可移植汇编",类似 Java 字节码。mma.sync 就写在这层。
+  │    不是机器码,任何 GPU 理论上都能"看懂"
+  │ ptxas(藏在 nvcc 里)
+  ▼
+SASS ── GPU 真正的机器码。只有这层,显卡的 SM 才直接执行。
+  │
+  ▼
+fatbin ── 一个"打包盒",把好几种架构的 SASS + 一份 PTX 装在一起,
+  │       每个舱门标架构号(sm_120a、sm_100f…)。这就是程序里的 __nv_fatbin。
+  ▼ 运行时(驱动)拆盒:
+找到"当前这张卡架构"的 SASS 舱
+  ├─ 有 ──► 直接跑
+  ├─ 没有,但盒里有 PTX ──► JIT:驱动现场把 PTX 编成 SASS 再跑(慢,但能跑)
+  └─ 都没有 ──► 报错 "no kernel image is available for execution on the device"</pre>
+
+<table>
+  <tr><th>词</th><th>一句话</th></tr>
+  <tr><td>PTX</td><td>可移植汇编(像字节码),<code>mma.sync</code> 写在这层,不是机器码</td></tr>
+  <tr><td>SASS</td><td>GPU 真机器码,SM 直接执行</td></tr>
+  <tr><td>ptxas</td><td>PTX → SASS 的编译器(嵌在 nvcc 里)</td></tr>
+  <tr><td>cubin</td><td>装了 SASS 的二进制文件</td></tr>
+  <tr><td>fatbin</td><td>打包盒:多个架构的 SASS + PTX 装一起</td></tr>
+  <tr><td>JIT</td><td>运行时即时编译:没有当前卡的 SASS 就用 PTX 现编</td></tr>
+  <tr><td>compute_XX</td><td>PTX 的目标架构(虚拟)</td></tr>
+  <tr><td>sm_XX</td><td>SASS 的目标架构(真实硬件);5090=sm_120a, B300=sm_100f</td></tr>
+</table>
+
+<div class="keybox"><b>和 0.1 的关系一句话</b>:<code>ARCH=120a</code> = 告诉 nvcc"编出给 5090 用的 SASS + PTX";
+用错 <code>ARCH=100f</code> = 盒里装的 SASS 是 B300 的,5090 拆盒时没有自己的舱,
+于是只能看"有没有 PTX 可以 JIT",或直接报错。用 <code>cuobjdump --list-elf</code> 能直接看到盒里的舱单。</div>
+
+<!-- ================= 5. 实验 ================= -->
+<h2 id="s5">5 · 实验步骤(0.1)——跑完把现象记进 <code>section0.md</code></h2>
+
+<p>本页是"讲解"。跑出来的<b>结果与现象请记进 Markdown 报告</b>(<code>reports/section0.md</code>),不要写在这个 HTML 里。</p>
+
+<ol>
+  <li><b>拿一张卡</b>(15 分钟租约,超时重新执行一次):
+    <pre><code>srun --partition=lcpu-infra --gres=gpu:1 --time=00:15:00 --pty bash
+nvidia-smi   <span class="annot"># 确认拿到 RTX 5090</span></code></pre>
+  </li>
+  <li><b>① 正确架构</b>(5090 = <code>ARCH=120a</code>):
+    <pre><code>cd /home/lcpu/39112061/ai-infra/wmhpc-training-camp-x-lcpu-ai-infra-seminars/assignment02/cuda
+ARCH=120a make -B run/m0_env/01_first_mma   <span class="annot"># -B 强制重编(ARCH 变了 make 不感知)</span></code></pre>
+  </li>
+  <li><b>② 不匹配架构</b>(默认 <code>100f</code>)——<b>记录现象的主角</b>:
+    <pre><code>make -B run/m0_env/01_first_mma</code></pre>
+  </li>
+  <li><b>③ 看 fatbin 舱单</b>(登录节点也能跑,不用卡):
+    <pre><code>cuobjdump --list-elf /home/lcpu/39112061/ai-infra/wmhpc-training-camp-x-lcpu-ai-infra-seminars/assignment02/cuda/bin/m0_env/01_first_mma</code></pre>
+  </li>
+  <li><b>④ 看 PTX 长啥样</b>:
+    <pre><code>ARCH=120a make -B ptx/m0_env/01_first_mma
+grep -n 'mma' /home/lcpu/39112061/ai-infra/wmhpc-training-camp-x-lcpu-ai-infra-seminars/assignment02/cuda/01_first_mma.ptx</code></pre>
+  </li>
+</ol>
+
+<div class="keybox"><b>报告里要记的三样东西</b>:① 正常输出(应 <code>PASS</code>);
+② 不匹配 ARCH 的现象(还 PASS?报 <code>no kernel image</code>?);③ 两次编译后
+<code>cuobjdump --list-elf</code> 的差异——用第 4 节的拆盒流程解释。</div>
+
+</div>
+</body>
+</html>

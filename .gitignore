@@ -43,6 +43,18 @@ assignment*/cuda/bin/
 *.fatbin
 *.sass
 
+# Profiling output (Nsight Compute / Nsight Systems)
+ncu-*
+ncu_report*
+*.ncu-rep
+*.nsys-rep
+*.nsys-prof
+*.prof
+
+# Core dumps (from crashed CUDA programs)
+core
+core.*
+
 # Misc
 .DS_Store
 
