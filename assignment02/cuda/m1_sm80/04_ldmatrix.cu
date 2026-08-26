@@ -27,13 +27,55 @@
 __device__ void load_manual(const uint8_t* sA, const uint8_t* sBk,
                             const uint8_t* sBn, unsigned (&a)[4],
                             unsigned (&b)[2]) {
-    (void)sA; (void)sBk; (void)sBn; (void)a; (void)b;
+    (void)sBk;
+    int lane = threadIdx.x;
+    int gid = lane / 4;  // 一组 4 个 lane（32 / N=8）
+    int tig = lane % 4;
+
+    // A 四象限,每寄存器 4 个沿 K 的 fp8: r0 左上, r1 左下, r2 右上, r3 右下
+    a[0] = *(const unsigned*)&sA[gid * 32 + 4 * tig];
+    a[1] = *(const unsigned*)&sA[(gid + 8) * 32 + 4 * tig];
+    a[2] = *(const unsigned*)&sA[gid * 32 + 4 * tig + 16];
+    a[3] = *(const unsigned*)&sA[(gid + 8) * 32 + 4 * tig + 16];
+    // B 用 sBn(n-major,K 连续)。r=0 上半 K, r=1 下半 K(+16)
+    b[0] = *(const unsigned*)&sBn[gid * 32 + 4 * tig];
+    b[1] = *(const unsigned*)&sBn[gid * 32 + 4 * tig + 16];
 }
 
 __device__ void load_ldsm(const uint8_t* sA, const uint8_t* sBk,
                           const uint8_t* sBn, unsigned (&a)[4],
                           unsigned (&b)[2]) {
-    (void)sA; (void)sBk; (void)sBn; (void)a; (void)b;
+    (void)sBk;
+    int lane = threadIdx.x;
+    // ldmatrix 一次要 8 个「行地址」(连续 16 个元素)。
+    // 32 个 lane 按 8 人一组,组号正好对应 fragment 的寄存器 r:
+    //   lane  0..7  → r=0 左上 / B 上半
+    //   lane  8..15 → r=1 左下 / B 下半
+    //   lane 16..23 → r=2 右上 (A 才用)
+    //   lane 24..31 → r=3 右下 (A 才用)
+    int r = lane / 8;
+    int row8 = lane % 8;  // 这一组里第几行,拿去当 ldmatrix 的行地址
+
+    // A: sA 行主序 [16][32]。.x4 四组地址对上四个象限。
+    //    行: 上半 row8 / 下半 row8+8;  列: 左半 0 / 右半 +16。
+    int a_row = row8 + 8 * (r % 2);
+    int a_col = 16 * (r / 2);
+    uint32_t aAddr = __cvta_generic_to_shared(&sA[a_row * 32 + a_col]);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 "
+                 "{%0,%1,%2,%3}, [%4];\n"
+                 : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3])
+                 : "r"(aAddr));
+
+    // B: sBn [8][32] n-major,一行就是某个 n 的 32 个 k。
+    //    .x2 只用 r=0,1 两组(lane 0..15);后面两组地址无效,给合法值即可。
+    //    r%2=0 → K 上半(k=0), r%2=1 → K 下半(k=16)。row8 当列号 n。
+    int b_n = row8;
+    int b_k = 16 * (r % 2);
+    uint32_t bAddr = __cvta_generic_to_shared(&sBn[b_n * 32 + b_k]);
+    asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 "
+                 "{%0,%1}, [%2];\n"
+                 : "=r"(b[0]), "=r"(b[1])
+                 : "r"(bAddr));
 }
 
 template <bool USE_LDSM>
