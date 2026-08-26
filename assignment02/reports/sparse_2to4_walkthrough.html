@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>2:4 稀疏 Tensor Core · 内积 / 外积 / 效率收益,一次说清</title>
+<style>
+  :root{
+    --ink:#1f2430; --sub:#5b6472; --line:#e4e7ec; --bg:#fbfbfc;
+    --accent:#2563eb; --accent-soft:#eff4ff;
+    --a-col:#2563eb; --b-col:#059669; --d-col:#d97706;
+    --code-bg:#f4f5f7;
+  }
+  *{box-sizing:border-box}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"PingFang SC","Noto Sans CJK SC",sans-serif;
+       color:var(--ink); background:var(--bg); line-height:1.65; margin:0; padding:0 18px 80px; font-size:15px;}
+  .wrap{max-width:1100px; margin:0 auto;}
+  h1{font-size:26px; margin:28px 0 6px;}
+  h1 small{display:block; font-size:14px; color:var(--sub); font-weight:400; margin-top:4px;}
+  h2{font-size:21px; margin:44px 0 12px; padding-top:14px; border-top:2px solid var(--line);}
+  h3{font-size:17px; margin:26px 0 8px;}
+  p{margin:10px 0;}
+  code{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:0.92em;
+       background:var(--code-bg); padding:1px 5px; border-radius:4px;}
+  pre{background:#0f172a; color:#e2e8f0; padding:14px 16px; border-radius:8px; overflow-x:auto;
+      font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:13.5px; line-height:1.55;}
+  pre code{background:none; color:inherit; padding:0;}
+  .annot{color:#94a3b8;}
+  .keybox{background:var(--accent-soft); border-left:4px solid var(--accent); padding:10px 14px; border-radius:0 6px 6px 0; margin:14px 0;}
+  .keybox b{color:var(--accent);}
+  .term{background:#fdf6ec; border-left:4px solid #d97706; padding:10px 14px; border-radius:0 6px 6px 0; margin:14px 0;}
+  .term b{color:#b45309;}
+  .cap{font-size:13px; color:var(--sub);}
+  table{border-collapse:collapse; width:100%; margin:12px 0; font-size:14px;}
+  th,td{border:1px solid var(--line); padding:6px 10px; text-align:left;}
+  th{background:var(--code-bg);}
+  td code{background:#fff; border:1px solid var(--line);}
+  .ok{color:#065f46; font-weight:700;}
+  .no{color:#b91c1c; font-weight:700;}
+  .tag{display:inline-block; font-size:12px; color:#fff; border-radius:4px; padding:1px 8px; margin-right:6px; vertical-align:1px;}
+  .tag.a{background:var(--a-col);} .tag.b{background:var(--b-col);} .tag.d{background:var(--d-col);}
+
+  /* ---- 矩阵栅格 ---- */
+  .zmtx{background:#fff; border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin:14px 0;}
+  .zmtx .ztitle{font-weight:700; margin-bottom:2px;}
+  .zmtx .zdim{color:var(--sub); font-size:13px; margin-bottom:8px;}
+  .grid{display:grid; gap:1px; background:#cbd5e1; padding:1px; border:1px solid #94a3b8; border-radius:4px; width:max-content;}
+  .gcell{width:46px; height:30px; display:flex; align-items:center; justify-content:center;
+         font-family:ui-monospace,Menlo,Consolas,monospace; font-size:13px; background:#fff;}
+  .gcell.hd{background:#f1f5f9; color:#64748b; font-weight:600; font-size:11px;}
+  .gcell.keep{background:#ecfdf5; color:#065f46; font-weight:700; border-bottom:2px solid var(--b-col);}
+  .gcell.zero{background:#fef2f2; color:#ef4444; font-weight:700;}
+  .gcell.rout{outline:2px solid var(--b-col); outline-offset:-2px; background:#ecfdf5; color:#065f46; font-weight:700;}
+
+  /* ---- 外积几何 ---- */
+  .op{display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin:12px 0;}
+  .op .gop{font-size:22px; font-weight:700; color:var(--sub);}
+
+  /* ---- 喂入三栏 ---- */
+  .feed3{display:flex; gap:16px; flex-wrap:wrap; margin:14px 0;}
+  .fcol{flex:1; min-width:230px; border:1px solid var(--line); border-radius:10px; padding:10px 12px; background:#fff;}
+  .fcol .fh{font-weight:700; font-size:13px; margin-bottom:6px;}
+  .fcol .fb{font-size:12.5px; color:var(--sub);}
+  .fcol.a{border-top:3px solid var(--a-col);}
+  .fcol.b{border-top:3px solid var(--b-col);}
+  .fcol.d{border-top:3px solid var(--d-col);}
+
+  .legend{display:flex; gap:5px; align-items:center; flex-wrap:wrap; font-size:12px; color:var(--sub);}
+  .legend .sw{width:14px; height:14px; border-radius:3px; border:1px solid rgba(0,0,0,.15);}
+  details{background:#fff; border:1px solid var(--line); border-radius:8px; padding:8px 14px; margin:10px 0;}
+  summary{cursor:pointer; font-weight:600;}
+  ul{margin:8px 0; padding-left:22px;}
+  li{margin:4px 0;}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>2:4 稀疏 Tensor Core · 内积 / 外积 / 效率收益,一次说清<small>一个 <code>2×4</code> 稀疏 × <code>4×3</code> 稠密 = <code>2×3</code> 的最小例子,把内积/外积之争和稀疏化两层收益讲透</small></h1>
+
+<div class="term"><b>术语约定(先统一口径,避免歧义)</b>:本文中「一拍」特指 <b>Tensor Core 沿 K 维度的一个基本处理步长</b>——
+每 4 个连续的 k 为一组,是稀疏指令的最小处理单元,与稠密指令的 K 步长对齐。</div>
+
+<div class="legend">
+  <span><span class="sw" style="background:#ecfdf5;border-color:var(--b-col)"></span> 保留的非零</span>
+  <span><span class="sw" style="background:#fef2f2"></span> 被剪掉的(零,不参与乘加)</span>
+</div>
+
+<!-- ============ 一、内积 vs 外积 ============ -->
+<h2>一 · 核心问题 1:Tensor Core 每拍做的是内积还是外积?</h2>
+
+<div class="keybox"><b>结论先行</b>:<b>结果视角是内积,执行视角是外积,两者完全等价</b>。
+这是同一个矩阵乘法的两种等价描述,分别对应软件语义和硬件行为。</div>
+
+<h3>1. 软件语义(结果视角):每个输出格是向量内积</h3>
+<p>矩阵乘法的定义天然是内积——对单个输出格子 <code>C[r][n]</code> 来说,它等于 A 的第 r 行与 B 的第 n 列沿 K 维度做点积:</p>
+<pre><code>C[r][n] = Σ<sub>k</sub> A[r][k]·B[k][n]</code></pre>
+<p>以本例 <code>2×4 × 4×3 = 2×3</code> 为例,稠密模式下 <code>C[0][0]</code> 是标准的 4 项向量内积:</p>
+<pre><code>C[0][0] = 1×9 + 2×12 + 3×15 + 4×18 = 9 + 24 + 45 + 72 = <b>150</b></code></pre>
+
+<h3>2. 硬件执行(单拍视角):每拍一次外积(秩一)更新</h3>
+<p>Tensor Core 是一个固定大小的 <code>M×N</code> 乘加阵列,所有输出格子并行更新。
+它不会单独算某一个内积,而是把矩阵乘拆成 <b>K 个秩一更新(外积)</b>,逐个累加:
+每一次取 A 的一整列 × B 的一整行,做外积,<b>一次性更新全部 M×N 个输出格子</b>。</p>
+
+<p>外积的定义:列向量 <b>a</b> ⊗ 行向量 <b>b</b><sup>T</sup> = 一个矩阵:</p>
+<div class="op">
+  <div class="grid" style="grid-template-columns:repeat(1,46px)">
+    <div class="gcell">a<sub>0</sub></div>
+    <div class="gcell">a<sub>1</sub></div>
+  </div>
+  <div class="gop">×</div>
+  <div class="grid" style="grid-template-columns:repeat(3,46px)">
+    <div class="gcell">b<sub>0</sub></div><div class="gcell">b<sub>1</sub></div><div class="gcell">b<sub>2</sub></div>
+  </div>
+  <div class="gop">=</div>
+  <div class="grid" style="grid-template-columns:repeat(3,46px)">
+    <div class="gcell">a<sub>0</sub>b<sub>0</sub></div><div class="gcell">a<sub>0</sub>b<sub>1</sub></div><div class="gcell">a<sub>0</sub>b<sub>2</sub></div>
+    <div class="gcell">a<sub>1</sub>b<sub>0</sub></div><div class="gcell">a<sub>1</sub>b<sub>1</sub></div><div class="gcell">a<sub>1</sub>b<sub>2</sub></div>
+  </div>
+</div>
+<p class="cap">每个外积格子恰好是输出矩阵 C 的一个格子在这一拍收到的一项。</p>
+
+<p>对应到本例,稠密模式 K=4,就是 4 个秩一更新(硬件按 4 个 k 一组打包成 <b>1 拍</b>):</p>
+<table>
+  <tr><th>秩一更新</th><th>A 列</th><th>B 行</th><th>本步外积(加到 C 上)</th></tr>
+  <tr><td>k=0</td><td>[1, 5]</td><td>[9, 10, 11]</td><td>[[9,10,11], [45,50,55]]</td></tr>
+  <tr><td>k=1</td><td>[2, 6]</td><td>[12,13,14]</td><td>[[24,26,28], [72,78,84]]</td></tr>
+  <tr><td>k=2</td><td>[3, 7]</td><td>[15,16,17]</td><td>[[45,48,51], [105,112,119]]</td></tr>
+  <tr><td>k=3</td><td>[4, 8]</td><td>[18,19,20]</td><td>[[72,76,80], [144,152,160]]</td></tr>
+  <tr><td><b>最终 C</b></td><td colspan="3"><b>[[150, 160, 170], [366, 392, 418]]</b>(4 项全部累加)</td></tr>
+</table>
+<p class="cap">4 步走完,每个输出格子恰好累加了 4 项——和内积的计算结果完全一致。</p>
+
+<h3>3. 等价性与指令对应</h3>
+<table>
+  <tr><th>指令</th><th>输出</th><th>沿 K 的秩一更新</th><th>每格最终内积项数</th></tr>
+  <tr><td><code>mma.sync.aligned.m16n8k16</code>(稠密)</td><td>16×8</td><td>K=16 个</td><td>16 项</td></tr>
+  <tr><td><code>mma.sync.aligned.m16n8k32.sp</code>(稀疏)</td><td>16×8</td><td>名义 K=32,其中每 4 个位置只有 2 个有效</td><td>16 项有效</td></tr>
+</table>
+<p class="cap"><b>一句话总结:单步硬件执行是外积,沿 K 多步累加后等价于内积。</b>两种描述只是观察维度不同,没有矛盾。</p>
+
+<!-- ============ 二、稀疏怎么提效 ============ -->
+<h2>二 · 核心问题 2:2:4 稀疏到底怎么提升效率?</h2>
+
+<p>效率提升来自<b>两个独立的层面</b>,分别作用在访存链路和计算链路上,缺一不可。</p>
+
+<h3>第一层:A 侧存储压缩,访存带宽减半</h3>
+<p>作用在 <b>显存 → 寄存器</b> 的搬运链路上。2:4 剪枝后,权重 A 不存零值,而是按
+「每 4 个 k 存 2 个有效值 + 2 bit 索引」的压缩格式存储。零值既不占显存,也不占访存带宽。</p>
+<table>
+  <tr><th>格式</th><th>每行每 4 个 k 的存储量</th><th>相对比例</th></tr>
+  <tr><td>稠密</td><td>4 × 2 Byte = 8 Byte</td><td>100%</td></tr>
+  <tr><td>2:4 稀疏压缩</td><td>2 × 2 Byte + 2 bit ≈ 4.25 Byte</td><td>~53%(省 ~47%)</td></tr>
+</table>
+<p class="cap"><b>关键边界</b>:① 只有稀疏侧(权重 A)省带宽,激活 B、输出 C 始终稠密,带宽不变;
+② 索引开销极小(每 4 个 k 仅 2 bit);③ 压缩是离线完成的,运行时硬件直接读压缩格式,不需要运行时解压。</p>
+
+<h3>第二层:计算吞吐翻倍,有效乘加密度加倍</h3>
+<p>作用在 <b>Tensor Core 计算链路</b>上,是最核心的收益,也是很多人理解模糊的地方。</p>
+
+<p><b>硬件实现:索引选通,零值不计算。</b>每一组(4 个名义 k)的输入是:</p>
+<div class="feed3">
+  <div class="fcol a"><div class="fh">A 侧</div><div class="fb">2 个有效值 + 2 bit 索引(零值从未进入寄存器)</div></div>
+  <div class="fcol b"><div class="fh">B 侧</div><div class="fb">4 个完整值(B 稠密,全部就位)</div></div>
+  <div class="fcol d"><div class="fh">计算</div><div class="fb">按索引从 B 的 4 个值挑出对应 2 个,与 A 的 2 个有效值配对乘加;另 2 个位置直接跳过</div></div>
+</div>
+
+<p><b>吞吐翻倍的本质:同样时间,两倍名义 K。</b></p>
+<table>
+  <tr><th></th><th>名义 K</th><th>每格有效乘加</th><th>执行延迟</th></tr>
+  <tr><td>稠密 <code>m16n8k16</code></td><td>K=16</td><td>16 项</td><td>T</td></tr>
+  <tr><td>稀疏 <code>m16n8k32.sp</code></td><td>名义 K=32</td><td>16 项</td><td><b>同样 T</b></td></tr>
+</table>
+<p class="cap">相同的硬件、相同的执行周期,稀疏指令能处理两倍的名义 K。对已经 2:4 剪枝的模型,
+有效非零项只有一半,用稀疏指令计算耗时减半,等效计算吞吐翻倍。</p>
+
+<h3>常见误区澄清</h3>
+<table>
+  <tr><th></th><th>误区</th><th>实情</th></tr>
+  <tr><td class="no">✕</td><td>稀疏 Tensor Core 是把乘法器砍了一半</td><td class="ok">✓ 乘法阵列硬件没有减少,只是通过索引跳过了零值对应的无效运算,相同时间内完成两倍名义规模的运算</td></tr>
+  <tr><td class="no">✕</td><td>稀疏后 B 侧也省带宽</td><td class="ok">✓ B 侧是稠密激活,必须完整读取所有 K 行,带宽不变;只有稀疏的权重侧 A 省带宽</td></tr>
+  <tr><td class="no">✕</td><td>稀疏就是软件跳零,和手动判断零再算一样</td><td class="ok">✓ 跳零完全由硬件原生支持:零值不读、不算、无分支开销;软件跳零会引入分支发散和额外指令,收益极低甚至为负</td></tr>
+</table>
+
+<!-- ============ 三、例子完整走一遍 ============ -->
+<h2>三 · 回到 2×4×3 最小例子:完整走一遍硬件流程</h2>
+
+<p>把稠密和稀疏两种模式的执行过程对应起来,一眼看清差异。</p>
+
+<h3>稠密模式:4 个秩一更新(1 拍),24 次有效乘加</h3>
+<p>输出 2×3,K=4,总乘加次数 = 2×3×4 = 24。</p>
+<table>
+  <tr><th>秩一更新</th><th>A 列输入</th><th>B 行输入</th><th>本步外积(加到 C)</th></tr>
+  <tr><td>k=0</td><td>[1, 5]</td><td>[9, 10, 11]</td><td>[[9,10,11], [45,50,55]]</td></tr>
+  <tr><td>k=1</td><td>[2, 6]</td><td>[12,13,14]</td><td>[[24,26,28], [72,78,84]]</td></tr>
+  <tr><td>k=2</td><td>[3, 7]</td><td>[15,16,17]</td><td>[[45,48,51], [105,112,119]]</td></tr>
+  <tr><td>k=3</td><td>[4, 8]</td><td>[18,19,20]</td><td>[[72,76,80], [144,152,160]]</td></tr>
+  <tr><td><b>最终 C</b></td><td colspan="3"><b>[[150, 160, 170], [366, 392, 418]]</b></td></tr>
+</table>
+
+<h3>稀疏模式:1 拍 = 4 名义 k,2 个有效 k,12 次有效乘加</h3>
+<p>剪枝规则:行 0 保留 <code>k0, k2</code>(索引 <code>"0,2"</code>,有效值 <code>[1, 3]</code>);
+行 1 保留 <code>k1, k3</code>(索引 <code>"1,3"</code>,有效值 <code>[6, 8]</code>)。</p>
+
+<p>硬件在一组内,按每行各自的索引只执行有效乘加——行 0 只算 k0、k2,行 1 只算 k1、k3。
+<b>总有效乘加 = 2×3×2 = 12,正好是稠密的一半</b>。硬件处理一整组的时间和稠密 1 拍相当 → 等效吞吐翻倍。</p>
+
+<p><b>这一拍,6 个输出格子各自收到什么:</b></p>
+<table>
+  <tr><th>输出格子</th><th>A 侧喂入(该行的值+索引)</th><th>参与乘加的 B 值</th><th>本拍累加</th></tr>
+  <tr><td><code>C[0][0]</code></td><td>行0: <code>1, 3</code> + "0,2"</td><td><code>B[0][0]=9</code>, <code>B[2][0]=15</code></td><td><b>1×9 + 3×15 = 54</b></td></tr>
+  <tr><td><code>C[0][1]</code></td><td>行0: <code>1, 3</code> + "0,2"</td><td><code>B[0][1]=10</code>, <code>B[2][1]=16</code></td><td><b>1×10 + 3×16 = 58</b></td></tr>
+  <tr><td><code>C[0][2]</code></td><td>行0: <code>1, 3</code> + "0,2"</td><td><code>B[0][2]=11</code>, <code>B[2][2]=17</code></td><td><b>1×11 + 3×17 = 62</b></td></tr>
+  <tr><td><code>C[1][0]</code></td><td>行1: <code>6, 8</code> + "1,3"</td><td><code>B[1][0]=12</code>, <code>B[3][0]=18</code></td><td><b>6×12 + 8×18 = 216</b></td></tr>
+  <tr><td><code>C[1][1]</code></td><td>行1: <code>6, 8</code> + "1,3"</td><td><code>B[1][1]=13</code>, <code>B[3][1]=19</code></td><td><b>6×13 + 8×19 = 230</b></td></tr>
+  <tr><td><code>C[1][2]</code></td><td>行1: <code>6, 8</code> + "1,3"</td><td><code>B[1][2]=14</code>, <code>B[3][2]=20</code></td><td><b>6×14 + 8×20 = 244</b></td></tr>
+</table>
+
+<p><b>4 个乘法位明细:</b>拿输出列 n=0 的两个格子看。注意 B 列 0 的 4 个值(9, 12, 15, 18)<b>全部被用到</b>,只是被不同的行用到:</p>
+<table>
+  <tr><th>乘法位</th><th>C[0][0](行 0 的格子,索引 "0,2")</th><th>C[1][0](行 1 的格子,索引 "1,3")</th></tr>
+  <tr><td>k0</td><td>A=1 × B[0][0]=9 → <b>9</b></td><td>空闲(行 1 的索引点名 k1、k3)</td></tr>
+  <tr><td>k1</td><td>空闲(行 0 的索引点名 k0、k2)</td><td>A=6 × B[1][0]=12 → <b>72</b></td></tr>
+  <tr><td>k2</td><td>A=3 × B[2][0]=15 → <b>45</b></td><td>空闲</td></tr>
+  <tr><td>k3</td><td>空闲</td><td>A=8 × B[3][0]=18 → <b>144</b></td></tr>
+  <tr><td><b>本拍结果</b></td><td><b>54</b></td><td><b>216</b></td></tr>
+</table>
+<p class="cap">看 k1 这一行:<code>B[1][0]=12</code> 对 <code>C[0][0]</code> 空闲、对 <code>C[1][0]</code> 活跃(6×12)。
+<b>跳零的单位是「一行 × 一个 4-k 组」,由该行自己的索引决定</b>。</p>
+
+<h3>稀疏的粒度:按行、沿 K</h3>
+<p>2:4 的保证只有一条:<b>每一行、每 4 个连续 k,恰好 2 个非零</b>。它对「列」没有任何要求。
+本例剪枝后 A 的 4 个列:</p>
+<div class="grid" style="grid-template-columns:repeat(4,46px); margin:10px 0;">
+  <div class="gcell keep">1</div><div class="gcell zero">0</div><div class="gcell keep">3</div><div class="gcell zero">0</div>
+  <div class="gcell zero">0</div><div class="gcell keep">6</div><div class="gcell zero">0</div><div class="gcell keep">8</div>
+</div>
+<p class="cap">列 k0=(1,0)、k1=(0,6)、k2=(3,0)、k3=(0,8)——本例每列恰好一个非零,是因为两行保留位正好互补("0,2" vs "1,3"),纯属巧合。</p>
+<p>如果两行都保留 <code>{k0, k2}</code>,2:4 照样成立,但列会变成全非零或全零:</p>
+<div class="grid" style="grid-template-columns:repeat(4,46px); margin:10px 0;">
+  <div class="gcell keep">1</div><div class="gcell zero">0</div><div class="gcell keep">3</div><div class="gcell zero">0</div>
+  <div class="gcell keep">5</div><div class="gcell zero">0</div><div class="gcell keep">7</div><div class="gcell zero">0</div>
+</div>
+<p class="cap">列 k0=(1,5) 全非零,列 k1=(0,0) 全零——每行仍是 4 个里 2 个非零,2:4 成立。</p>
+<p>所以:跳零粒度是「一行 × 一个 4-k 组」,硬件沿 K 一次处理一整组,组内按行各跳各的;
+一个 k 位置(如 k1)对行 0 是零、对行 1 是非零,完全允许——上面的乘法位表就是活例子。</p>
+
+<p>最终稀疏结果(与等价稠密视图 A×B 完全一致):</p>
+<div class="zmtx">
+  <div class="ztitle">C = A_sparse × B</div>
+  <div class="zdim">2×3 · 12 次有效乘加</div>
+  <div class="grid" style="grid-template-columns:repeat(3,46px)">
+    <div class="gcell hd">n0</div><div class="gcell hd">n1</div><div class="gcell hd">n2</div>
+    <div class="gcell">54</div><div class="gcell">58</div><div class="gcell">62</div>
+    <div class="gcell">216</div><div class="gcell">230</div><div class="gcell">244</div>
+  </div>
+</div>
+
+<!-- ============ 四、总结 ============ -->
+<h2>四 · 最终总结</h2>
+<ul>
+  <li><b>计算范式</b>:Tensor Core 单拍执行外积(秩一)更新,沿 K 多步累加后等价于矩阵乘法(每个输出格为内积),两种描述维度不同、本质一致。</li>
+  <li><b>稀疏收益</b>:
+    <ul>
+      <li>访存侧:稀疏权重 A 压缩存储,零不占位,带宽约省一半;</li>
+      <li>计算侧:硬件原生索引选通,零值不参与乘加,相同时间可处理两倍名义 K,计算吞吐翻倍;</li>
+      <li>B 侧与输出始终稠密,带宽、格式均不变。</li>
+    </ul>
+  </li>
+  <li><b>数值对应</b>:3,352 → 1,676 就是总乘加次数减半,正好对应 2:4 稀疏的有效计算密度。</li>
+</ul>
+
+<details>
+<summary>回到 0.2:3,352 → 1,676 的完整推导</summary>
+<p>官方 5090 的 <code>3,352 TOPS</code> 是 <b>FP4 + 2:4 稀疏</b>。稀疏模式的名义吞吐 = 稠密 × 2,
+去稀疏 <code>÷2 → 1,676</code>(FP4 dense),再按 dtype 宽度关系 <code>÷2 → FP8 = 838</code>、<code>÷2 → BF16 = 419</code>。</p>
+<p>乘加对账:稠密 2×4×3 = 24 MAC;稀疏 2×2×3 = 12 MAC,减半。</p>
+</details>
+
+</div>
+</body>
+</html>

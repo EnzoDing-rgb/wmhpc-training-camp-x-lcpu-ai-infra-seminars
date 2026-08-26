@@ -16,11 +16,46 @@
 #include <cstdio>
 #include <cstdint>
 
-// TODO: 实现四个函数。lane 0-31;A 的 i 0-15,B 的 i 0-7。
-static int a_row_of(int lane, int i) { (void)lane; (void)i; return 0; }
-static int a_col_of(int lane, int i) { (void)lane; (void)i; return 0; }
-static int b_row_of(int lane, int i) { (void)lane; (void)i; return 0; }  // k
-static int b_col_of(int lane, int i) { (void)lane; (void)i; return 0; }  // n
+// 读法与课上 m16n8k16 fp16 的 fragment 图同一套(四象限 + gid/tig/r):
+//   lane = gid * 4 + tig
+//   gid  = lane / 4          (0..7, 象限内的行)
+//   tig  = lane % 4          (0..3, 象限内的列组)
+//   i 是本 lane fragment 里的 byte 序号; r = i/4 是寄存器, j = i%4 是寄存器内第几个 byte
+//
+// 课上 k16 fp16(每个寄存器跨 2 列,右象限 +8):
+//   row = gid + 8 * (r % 2)
+//   col = 2 * tig + 8 * (r / 2)
+// 本题 k32 e4m3 只改两处常数:每个寄存器跨 4 列(4 个 fp8),右半沿 K +16:
+//   row = gid + 8 * (r % 2)
+//   col = 4 * tig + 16 * (r / 2) + j
+// 四象限: r=0 左上, r=1 左下, r=2 右上, r=3 右下。
+static int a_row_of(int lane, int i) {
+    int gid = lane / 4;
+    int r = i / 4;
+    return gid + 8 * (r % 2);
+}
+
+static int a_col_of(int lane, int i) {
+    int tig = lane % 4;
+    int r = i / 4;
+    int j = i % 4;
+    return 4 * tig + 16 * (r / 2) + j;
+}
+
+static int b_row_of(int lane, int i) {  // k
+    // 课上 k16 fp16 图: k = 2 * (lane % 4) + 8 * r
+    // 本题 K=32、每寄存器 4 个 fp8: 2→4, 8→16, 再加格内 j
+    int tig = lane % 4;
+    int r = i / 4;
+    int j = i % 4;
+    return 4 * tig + 16 * r + j;
+}
+
+static int b_col_of(int lane, int i) {  // n
+    (void)i;
+    int gid = lane / 4;
+    return gid;
+}
 
 // 以下为判测,不需要修改。表项 = row * 32 + col(A)/ k * 8 + n(B)。
 static const short A_POS[32 * 16] = {

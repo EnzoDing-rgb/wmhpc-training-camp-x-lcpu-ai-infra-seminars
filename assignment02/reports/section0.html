@@ -59,6 +59,17 @@
   .kacc th,.kacc td{padding:2px 8px; text-align:right; font-size:13px; font-variant-numeric:tabular-nums;}
   .kacc th{background:var(--code-bg);}
 
+  /* ---- 真实 lane 全矩阵视图 ---- */
+  .zmtx{background:#fff; border:1px solid var(--line); border-radius:10px; padding:12px 14px; margin:14px 0;}
+  .zmtx .ztitle{font-weight:700; margin-bottom:2px;}
+  .zmtx .zdim{color:var(--sub); font-size:13px; margin-bottom:8px;}
+  .zgrid{display:grid; gap:1px; background:#e2e8f0; padding:1px; border:1px solid #94a3b8; border-radius:4px; width:max-content;}
+  .zc{width:20px; height:20px; display:flex; align-items:center; justify-content:center; font-size:10px; font-family:ui-monospace,Menlo,Consolas,monospace;}
+  .zax{background:#f1f5f9; color:#64748b; font-weight:600;}
+  .zval{background:#fff; color:#b6c2d4;}
+  .zh{font-weight:800; color:#0f172a;}
+  .zc.zf{width:auto; height:22px; min-width:26px; padding:0 3px; font-size:10px;}
+
   /* ---- 块地图 ---- */
   .maps{display:flex; gap:22px; flex-wrap:wrap; align-items:flex-start; margin:14px 0;}
   .mapbox{border:1px solid var(--line); border-radius:10px; padding:12px 14px; background:#fff;}
@@ -269,6 +280,38 @@ B 第 n 列从顶部喂下来(同时喂给它那一列全部 16 个 cell)</b>—
 但 mma 要多拍完成,所以每周期峰值没那么夸张:5090 的 FP16 tensor dense 209.5 vs FP32 104.8 TFLOPS ≈ 2×,FP8/FP4 更高。
 "64× 少发射 + 每周期更高吞吐 + 多周期延迟被大量 resident warp 交错隐藏" = 完整加速来源。</p>
 
+<h3>把"128 个 cell 同时算"画出来(回答"为什么不是 128 拍")</h3>
+
+<p><b>先钉死每个 cell 最终算的是什么</b>:cell(r,n) 做的是 <b>A 第 r 行 × B 第 n 列</b> 的点积
+(<code>D[r][n] = A[r][0]·B[0][n] + A[r][1]·B[1][n] + … + A[r][15]·B[15][n]</code>)。</p>
+<p>但硬件是一拍一拍喂的——<b>每一拍</b>喂进的是 <b>k 切片</b>(A 的第 k 列 + B 的第 k 行),
+每个 cell 这一拍只算一个乘积、累加进自己的点积。下面两张图是相邻两拍:</p>
+<ul>
+  <li><b>左边一列</b>(蓝)= A 的第 <code>k</code> 列 <code>A[0..15][k]</code> —— 每个元素喂给它那一行全部 8 个 cell;</li>
+  <li><b>顶部一行</b>(绿)= B 的第 <code>k</code> 行 <code>B[k][0..7]</code> —— 每个元素喂给它那一列全部 16 个 cell;</li>
+  <li><b>中间 128 格</b> = cell,每格这一拍算出 <code>A[r][k]·B[k][n]</code>,累加进它的点积 <code>D[r][n]</code>。</li>
+</ul>
+
+<div class="zmtx">
+  <div class="ztitle">拍 k=0:每个 cell 累加 <code>A[r][0]·B[0][n]</code>(喂进来的是 A 第 0 列 + B 第 0 行)</div>
+  <div class="zgrid" id="beat0"></div>
+</div>
+<div class="zmtx">
+  <div class="ztitle">拍 k=1:每个 cell 累加 <code>A[r][1]·B[1][n]</code>(喂进来的是 A 第 1 列 + B 第 1 行)</div>
+  <div class="zgrid" id="beat1"></div>
+  <div class="cap">蓝列 = A 第 k 列的值,绿行 = B 第 k 行的值,中间每格(浅绿=乘积≥0 / 浅红=乘积&lt;0)= 这一拍 <code>A[r][k]·B[k][n]</code>。
+  16 拍累加完,每个 cell 就攒齐了它的<b>行 × 列点积</b>(见上面 D[0][0] 的累加表)。<b>每一拍,128 个格子一个都没闲着。</b></div>
+</div>
+
+<p class="cap"><b>别被"列 × 行"吓到</b>:"A 行 × B 列"是每个 cell 最终算出的点积(<b>内积视角</b>);
+"喂 A 第 k 列 + B 第 k 行"是每一拍进入阵列的数据切片(<b>外积视角</b>)。16 个外积累加,
+恰好等于每个 cell 的行 × 列点积——两个视角,同一个结果。</p>
+
+<div class="keybox"><b>时间只沿着 K 走,不沿着格子走</b>:
+<br>　你以为(串行):<code>cell0 → cell1 → … → cell127</code>,时间 ∝ 128 格
+<br>　实际(并行):128 个 cell 同时前进,各自把 k=0..15 累加完,时间 ∝ 16 拍
+<br>　所以 2048 个 MAC ≈ 16 拍(甚至更少)出炉,每拍 = 128 个 MAC。</div>
+
 <h3>快在哪?——三件事,从指令到硬件</h3>
 <table>
   <tr><th>维度</th><th>CUDA Core</th><th>Tensor Core</th></tr>
@@ -366,64 +409,27 @@ C/C++ 的多维数组、以及这题的 A/B/D 全是行主序。⚠️ 行步长
 <!-- ================= 2. 核心直觉图 ================= -->
 <h2 id="s2">2 · 核心直觉图:一个 warp 把矩阵切成 32 块</h2>
 
-<h3>2.1 三张矩阵,每一张都被 32 个线程瓜分</h3>
-<p>下面每张小方格 = <b>一个线程(lane)持有的一块 fragment</b>,格子里的数字就是 lane 号,
-颜色 = <code>group</code>(同组同色)。<b>三张地图的结构完全一样(都是 0..31 的顺序),变的只是每一块内部形状。</b></p>
+<h3>2.1 三张矩阵,每一格是谁的(真实尺寸 16×16 / 16×8)</h3>
+<p>下面三张是<b>真实尺寸</b>的矩阵。<b>每一格 = 一个元素,格子里是负责它的 lane 号,颜色也按 lane 标</b>
+(32 种颜色)。你能直接数出来:每个 lane 在 A 里拿 <b>8 格</b>、在 B 里拿 <b>4 格</b>、在 D 里拿 <b>4 格</b>,
+而且<b>每一格的位置都看得见</b>——lane 0 拿 A 的哪些格、lane 13 拿哪些格,一眼就能找到。</p>
 
-<div class="maps">
-  <div class="mapbox">
-    <div class="mtitle"><span class="tag a">A</span>A:16×16</div>
-    <div class="mdim">行步长 16 · 每块 = 行{g,g+8} × 列{2t,2t+1,2t+8,2t+9}(2行×4列,4列<b>不连续</b>)</div>
-    <div class="map">
-      <div class="blk g0">0<small>g0,t0</small></div><div class="blk g0">1<small>g0,t1</small></div><div class="blk g0">2<small>g0,t2</small></div><div class="blk g0">3<small>g0,t3</small></div>
-      <div class="blk g1">4<small>g1,t0</small></div><div class="blk g1">5<small>g1,t1</small></div><div class="blk g1">6<small>g1,t2</small></div><div class="blk g1">7<small>g1,t3</small></div>
-      <div class="blk g2">8<small>g2,t0</small></div><div class="blk g2">9<small>g2,t1</small></div><div class="blk g2">10<small>g2,t2</small></div><div class="blk g2">11<small>g2,t3</small></div>
-      <div class="blk g3">12<small>g3,t0</small></div><div class="blk g3">13<small>g3,t1</small></div><div class="blk g3">14<small>g3,t2</small></div><div class="blk g3">15<small>g3,t3</small></div>
-      <div class="blk g4">16<small>g4,t0</small></div><div class="blk g4">17<small>g4,t1</small></div><div class="blk g4">18<small>g4,t2</small></div><div class="blk g4">19<small>g4,t3</small></div>
-      <div class="blk g5">20<small>g5,t0</small></div><div class="blk g5">21<small>g5,t1</small></div><div class="blk g5">22<small>g5,t2</small></div><div class="blk g5">23<small>g5,t3</small></div>
-      <div class="blk g6">24<small>g6,t0</small></div><div class="blk g6">25<small>g6,t1</small></div><div class="blk g6">26<small>g6,t2</small></div><div class="blk g6">27<small>g6,t3</small></div>
-      <div class="blk g7">28<small>g7,t0</small></div><div class="blk g7">29<small>g7,t1</small></div><div class="blk g7">30<small>g7,t2</small></div><div class="blk g7">31<small>g7,t3</small></div>
-    </div>
-    <div class="cap">lane = g×4 + t。行组 g 负责 <code>行{g, g+8}</code>;列组 t 负责 <code>列{2t,2t+1,2t+8,2t+9}</code>。</div>
-  </div>
-
-  <div class="mapbox">
-    <div class="mtitle"><span class="tag b">B</span>B:16×8</div>
-    <div class="mdim">行步长 8 · 每块 = 行(k){2t,2t+1,2t+8,2t+9} × 列(n)=g(4行×1列)</div>
-    <div class="map">
-      <div class="blk g0">0<small>n0,kt0</small></div><div class="blk g0">1<small>n0,kt1</small></div><div class="blk g0">2<small>n0,kt2</small></div><div class="blk g0">3<small>n0,kt3</small></div>
-      <div class="blk g1">4<small>n1,kt0</small></div><div class="blk g1">5<small>n1,kt1</small></div><div class="blk g1">6<small>n1,kt2</small></div><div class="blk g1">7<small>n1,kt3</small></div>
-      <div class="blk g2">8<small>n2,kt0</small></div><div class="blk g2">9<small>n2,kt1</small></div><div class="blk g2">10<small>n2,kt2</small></div><div class="blk g2">11<small>n2,kt3</small></div>
-      <div class="blk g3">12<small>n3,kt0</small></div><div class="blk g3">13<small>n3,kt1</small></div><div class="blk g3">14<small>n3,kt2</small></div><div class="blk g3">15<small>n3,kt3</small></div>
-      <div class="blk g4">16<small>n4,kt0</small></div><div class="blk g4">17<small>n4,kt1</small></div><div class="blk g4">18<small>n4,kt2</small></div><div class="blk g4">19<small>n4,kt3</small></div>
-      <div class="blk g5">20<small>n5,kt0</small></div><div class="blk g5">21<small>n5,kt1</small></div><div class="blk g5">22<small>n5,kt2</small></div><div class="blk g5">23<small>n5,kt3</small></div>
-      <div class="blk g6">24<small>n6,kt0</small></div><div class="blk g6">25<small>n6,kt1</small></div><div class="blk g6">26<small>n6,kt2</small></div><div class="blk g6">27<small>n6,kt3</small></div>
-      <div class="blk g7">28<small>n7,kt0</small></div><div class="blk g7">29<small>n7,kt1</small></div><div class="blk g7">30<small>n7,kt2</small></div><div class="blk g7">31<small>n7,kt3</small></div>
-    </div>
-    <div class="cap">lane = n×4 + t。列组 n=g 固定一个 <b>输出列</b>;k 组 t 沿 <b>K 方向</b>取 4 个值 —— 这就是 <code>.col</code> 布局。</div>
-  </div>
-
-  <div class="mapbox">
-    <div class="mtitle"><span class="tag d">D</span>D:16×8</div>
-    <div class="mdim">行步长 8 · 每块 = 行{g,g+8} × 列{2t,2t+1}(2行×2列)</div>
-    <div class="map">
-      <div class="blk g0">0<small>g0,t0</small></div><div class="blk g0">1<small>g0,t1</small></div><div class="blk g0">2<small>g0,t2</small></div><div class="blk g0">3<small>g0,t3</small></div>
-      <div class="blk g1">4<small>g1,t0</small></div><div class="blk g1">5<small>g1,t1</small></div><div class="blk g1">6<small>g1,t2</small></div><div class="blk g1">7<small>g1,t3</small></div>
-      <div class="blk g2">8<small>g2,t0</small></div><div class="blk g2">9<small>g2,t1</small></div><div class="blk g2">10<small>g2,t2</small></div><div class="blk g2">11<small>g2,t3</small></div>
-      <div class="blk g3">12<small>g3,t0</small></div><div class="blk g3">13<small>g3,t1</small></div><div class="blk g3">14<small>g3,t2</small></div><div class="blk g3">15<small>g3,t3</small></div>
-      <div class="blk g4">16<small>g4,t0</small></div><div class="blk g4">17<small>g4,t1</small></div><div class="blk g4">18<small>g4,t2</small></div><div class="blk g4">19<small>g4,t3</small></div>
-      <div class="blk g5">20<small>g5,t0</small></div><div class="blk g5">21<small>g5,t1</small></div><div class="blk g5">22<small>g5,t2</small></div><div class="blk g5">23<small>g5,t3</small></div>
-      <div class="blk g6">24<small>g6,t0</small></div><div class="blk g6">25<small>g6,t1</small></div><div class="blk g6">26<small>g6,t2</small></div><div class="blk g6">27<small>g6,t3</small></div>
-      <div class="blk g7">28<small>g7,t0</small></div><div class="blk g7">29<small>g7,t1</small></div><div class="blk g7">30<small>g7,t2</small></div><div class="blk g7">31<small>g7,t3</small></div>
-    </div>
-    <div class="cap">lane = g×4 + t。每个线程写回 4 个输出,就是 mma 吐出的 d[4]。</div>
-  </div>
+<div class="zmtx">
+  <div class="ztitle"><span class="tag a">A</span>A:16×16 = 256 个元素,每 lane 8 格(2 行 × 4 列,列不连续)</div>
+  <div class="zgrid" id="wA"></div>
+  <div class="cap">找 lane 0:行 {0,8} × 列 {0,1,8,9}。找 lane 13:行 {3,11} × 列 {2,3,10,11}(第 2.3 节放大过它)。</div>
 </div>
 
-<div class="legend">
-  <span>group:</span>
-  <span class="sw g0"></span>0<span class="sw g1"></span>1<span class="sw g2"></span>2<span class="sw g3"></span>3
-  <span class="sw g4"></span>4<span class="sw g5"></span>5<span class="sw g6"></span>6<span class="sw g7"></span>7
+<div class="zmtx">
+  <div class="ztitle"><span class="tag b">B</span>B:16×8 = 128 个元素,每 lane 4 格(固定列 n=group,沿 k 取 4 格)</div>
+  <div class="zgrid" id="wB"></div>
+  <div class="cap">注意 lane 编号在 B 里是"竖向"的:同一列 n 由该组的 4 个 tig 瓜分,合起来 = 整列 16 个 k。</div>
+</div>
+
+<div class="zmtx">
+  <div class="ztitle"><span class="tag d">D</span>D:16×8 = 128 个输出,每 lane 4 格(行 {group,group+8} × 列 {2t,2t+1})</div>
+  <div class="zgrid" id="wD"></div>
+  <div class="cap">每个 2×2 色块 = 一个 lane 的 4 个输出。32 个 lane 拼起来 = 整个 D,无重无漏。</div>
 </div>
 
 <div class="keybox"><b>再钉一遍"fragment"这个词</b>:上面三张地图<b>每一张本身就是 mma 的一个整个 fragment</b>
@@ -456,7 +462,41 @@ d[2] → D[8*8+0]  d[3] → D[8*8+1]   <span class="annot">→ (行8, 列0,1)</s
 (<code>2t,2t+1</code> 和 <code>2t+8,2t+9</code> 隔着 8 个元素)。所以代码里才有 <code>+8</code> 那一下。
 同理,16 行切成 <code>group</code> 和 <code>group+8</code> 两半,所以 a[0]/a[1] 是"下半行",a[2]/a[3] 才是"上半行"。</p>
 
-<h3>2.3 三条"一通百通"的规律</h3>
+<h3>2.3 把 lane 13 直接画进整张矩阵(真实数字,验证"什么排在哪")</h3>
+
+<p>下面三张是<b>真实的 A/B/D 矩阵</b>(数值就是代码里那套公式算出来的)。<b>灰色</b> = 不属于
+lane 13 的元素;<b>彩色</b> = lane 13 的 fragment,颜色对应它的哪个寄存器。行号/列号都标在边上,
+对照代码里 <code>row*16+col</code> 的下标,你可以亲手验算每一格。</p>
+
+<div class="zmtx">
+  <div class="ztitle"><span class="tag a">A</span>A:16×16</div>
+  <div class="zdim">lane 13(group=3, tig=1)的 8 个元素 = <b>2 行 × 4 列</b>:行 {3,11} × 列 {2,3,10,11}</div>
+  <div class="zgrid" id="zA"></div>
+  <div class="cap">蓝=a[0](行3) · 绿=a[1](行11) · 橙=a[2](列10,11) · 紫=a[3]。<br>
+  对照代码:<code>ah[0]=A[(group)*16 + tig*2], A[(group)*16 + tig*2+1]</code> → 就是那 2 个蓝格。
+  两个 "+8" 在这张图里看得一清二楚:行 3→11(M 切半)、列 2→10(K 切半)。</div>
+</div>
+
+<div class="zmtx">
+  <div class="ztitle"><span class="tag b">B</span>B:16×8</div>
+  <div class="zdim">lane 13 的 4 个元素 = <b>固定列 n=3,沿 k 取 {2,3,10,11}</b>(.col 布局)</div>
+  <div class="zgrid" id="zB"></div>
+  <div class="cap">浅绿=b[0](k=2,3) · 深绿=b[1](k=10,11)。注意它们全在第 3 列——同一列 n=3 由
+  group 3 的 4 个 tig 各拿 4 个 k,合起来正好凑满整列 16 个 k,喂给点积。</div>
+</div>
+
+<div class="zmtx">
+  <div class="ztitle"><span class="tag d">D</span>D:16×8(输出)</div>
+  <div class="zdim">lane 13 的 4 个输出 = <b>行 {3,11} × 列 {2,3}</b>(2 行 × 2 列)</div>
+  <div class="zgrid" id="zD"></div>
+  <div class="cap">4 个橙 = d[0..3]。mma 为每个这样的输出,用"A 那一行 × B 那一列"沿 K 累加算出来。</div>
+</div>
+
+<div class="zoom">
+<pre id="zReg"></pre>
+</div>
+
+<h3>2.4 三条"一通百通"的规律</h3>
 <div class="keybox">
   ① <b>所有下标都是【元素数】,不是字节</b>。行步长 = 列数:A 有 16 列 → 步长 16;B/D 有 8 列 → 步长 8。
   字节偏移 = 元素下标 × 类型大小,编译器按指针类型(<code>__half</code>×2, <code>float</code>×4)隐式算,代码里看不到。
@@ -467,7 +507,7 @@ d[2] → D[8*8+0]  d[3] → D[8*8+1]   <span class="annot">→ (行8, 列0,1)</s
   看 A 就知道:8 个元素 = 2 行 × 4 列,而这 4 列是"左半 2 个 + 右半 2 个"。
 </div>
 
-<h3>2.4 行主序 vs <code>.row.col</code> —— 两个"行列"别混</h3>
+<h3>2.5 行主序 vs <code>.row.col</code> —— 两个"行列"别混</h3>
 <table>
   <tr><th></th><th>回答的问题</th><th>这题里的答案</th></tr>
   <tr><td><b>内存布局</b>(数组怎么排)</td><td>二维数组在内存里的顺序</td><td>全部行主序:<code>A[r*16+c]</code>,步长=列数</td></tr>
@@ -602,5 +642,110 @@ grep -n 'mma' /home/lcpu/39112061/ai-infra/wmhpc-training-camp-x-lcpu-ai-infra-s
 <code>cuobjdump --list-elf</code> 的差异——用第 4 节的拆盒流程解释。</div>
 
 </div>
+<script>
+// 纯静态渲染(无任何交互):把 lane 13 的 fragment 画进整张 A/B/D,方便对照代码下标。
+(function(){
+  var L=13, g=L>>2, t=L&3;
+  var A=[],B=[],D=[];
+  for(var r=0;r<16;r++){A[r]=[];for(var c=0;c<16;c++)A[r][c]=(r+c)%5-2;}
+  for(var k=0;k<16;k++){B[k]=[];for(var n=0;n<8;n++)B[k][n]=(k*n)%3-1;}
+  for(var r=0;r<16;r++){D[r]=[];for(var n=0;n<8;n++){var s=0;for(var k=0;k<16;k++)s+=A[r][k]*B[k][n];D[r][n]=s;}}
+  // lane 13: group=3, tig=1
+  var regA=function(r,c){if(r===3&&(c===2||c===3))return 0;if(r===11&&(c===2||c===3))return 1;if(r===3&&(c===10||c===11))return 2;if(r===11&&(c===10||c===11))return 3;return -1;};
+  var regB=function(k,n){if(n===3&&(k===2||k===3))return 0;if(n===3&&(k===10||k===11))return 1;return -1;};
+  var regD=function(r,c){if(r===3&&c===2)return 0;if(r===3&&c===3)return 1;if(r===11&&c===2)return 2;if(r===11&&c===3)return 3;return -1;};
+  var cA=['#bfdbfe','#bbf7d0','#fed7aa','#ddd6fe'];
+  var cB=['#86efac','#4ade80'];
+  var cD=['#fdba74','#fb923c','#f97316','#ea580c'];
+  function build(id,rows,cols,val,reg,colArr){
+    var el=document.getElementById(id);
+    el.style.gridTemplateColumns='24px repeat('+cols+',20px)';
+    var cor=document.createElement('div');cor.className='zc zax';el.appendChild(cor);
+    for(var j=0;j<cols;j++){var h=document.createElement('div');h.className='zc zax';h.textContent=j;el.appendChild(h);}
+    for(var r=0;r<rows;r++){
+      var ax=document.createElement('div');ax.className='zc zax';ax.textContent=r;el.appendChild(ax);
+      for(var cc=0;cc<cols;cc++){
+        var cell=document.createElement('div');
+        var ri=reg(r,cc);
+        if(ri>=0){cell.className='zc zh';cell.style.background=colArr[ri];cell.textContent=val(r,cc);}
+        else{cell.className='zc zval';cell.textContent=val(r,cc);}
+        el.appendChild(cell);
+      }
+    }
+  }
+  build('zA',16,16,function(r,c){return A[r][c];},regA,cA);
+  build('zB',16,8,function(k,n){return B[k][n];},regB,cB);
+  build('zD',16,8,function(r,n){return D[r][n];},regD,cD);
+  var s='// lane 13:group='+g+', tig='+t+'\n';
+  s+='a[0] = A[3*16+2]='+A[3][2]+' , A[3*16+3]='+A[3][3]+'        (行3,  列2,3)\n';
+  s+='a[1] = A[11*16+2]='+A[11][2]+' , A[11*16+3]='+A[11][3]+'     (行11, 列2,3)\n';
+  s+='a[2] = A[3*16+10]='+A[3][10]+' , A[3*16+11]='+A[3][11]+'     (行3,  列10,11)\n';
+  s+='a[3] = A[11*16+10]='+A[11][10]+' , A[11*16+11]='+A[11][11]+'  (行11, 列10,11)\n';
+  s+='b[0] = B[2*8+3]='+B[2][3]+' , B[3*8+3]='+B[3][3]+'          (k=2,3; n=3)\n';
+  s+='b[1] = B[10*8+3]='+B[10][3]+' , B[11*8+3]='+B[11][3]+'       (k=10,11; n=3)\n';
+  s+='d[0]→D[3][2]='+D[3][2]+'  d[1]→D[3][3]='+D[3][3]+'  d[2]→D[11][2]='+D[11][2]+'  d[3]→D[11][3]='+D[11][3];
+  document.getElementById('zReg').textContent=s;
+})();
+</script>
+<script>
+// 纯静态渲染:把 A/B/D 按"哪个 lane 负责哪一格"整张画出来(真实 16×16 / 16×8)。
+(function(){
+  var col32=[];
+  for(var i=0;i<32;i++)col32.push('hsl('+Math.round(i*11.25)+',68%,'+(86-i%3*4)+'%)');
+  var ownA=function(r,c){return (r%8)*4+((c%8)>>1);};
+  var ownB=function(k,n){return n*4+((k%8)>>1);};
+  var ownD=function(r,c){return (r%8)*4+(c>>1);};
+  function buildOwn(id,rows,cols,owner){
+    var el=document.getElementById(id);
+    el.style.gridTemplateColumns='24px repeat('+cols+',20px)';
+    var cor=document.createElement('div');cor.className='zc zax';el.appendChild(cor);
+    for(var j=0;j<cols;j++){var h=document.createElement('div');h.className='zc zax';h.textContent=j;el.appendChild(h);}
+    for(var r=0;r<rows;r++){
+      var ax=document.createElement('div');ax.className='zc zax';ax.textContent=r;el.appendChild(ax);
+      for(var c=0;c<cols;c++){
+        var cell=document.createElement('div');
+        var lane=owner(r,c);
+        cell.className='zc';
+        cell.style.background=col32[lane];
+        cell.style.color='#0f172a';
+        cell.style.fontWeight='700';
+        cell.textContent=lane;
+        el.appendChild(cell);
+      }
+    }
+  }
+  buildOwn('wA',16,16,ownA);
+  buildOwn('wB',16,8,ownB);
+  buildOwn('wD',16,8,ownD);
+})();
+</script>
+<script>
+// 纯静态渲染:拍 k 的喂数图 —— A 第 k 列(左)+ B 第 k 行(顶)+ 128 个 cell 的乘积。
+(function(){
+  var A=[],B=[];
+  for(var r=0;r<16;r++){A[r]=[];for(var c=0;c<16;c++)A[r][c]=(r+c)%5-2;}
+  for(var k=0;k<16;k++){B[k]=[];for(var n=0;n<8;n++)B[k][n]=(k*n)%3-1;}
+  function buildFeed(id,k){
+    var el=document.getElementById(id);
+    el.style.gridTemplateColumns='40px repeat(8,26px)';
+    var cor=document.createElement('div');cor.className='zc zf zax';cor.textContent='k='+k;el.appendChild(cor);
+    for(var n=0;n<8;n++){var h=document.createElement('div');h.className='zc zf';h.style.background='#dcfce7';h.style.fontWeight='700';h.textContent='B='+B[k][n];el.appendChild(h);}
+    for(var r=0;r<16;r++){
+      var a=document.createElement('div');a.className='zc zf';a.style.background='#dbeafe';a.style.fontWeight='800';a.textContent='A='+A[r][k];el.appendChild(a);
+      for(var n=0;n<8;n++){
+        var cell=document.createElement('div');
+        var p=A[r][k]*B[k][n];
+        cell.className='zc zf';
+        cell.style.background=p>=0?'#d1fae5':'#fee2e2';
+        cell.style.fontWeight='700';
+        cell.textContent=p;
+        el.appendChild(cell);
+      }
+    }
+  }
+  buildFeed('beat0',0);
+  buildFeed('beat1',1);
+})();
+</script>
 </body>
 </html>
