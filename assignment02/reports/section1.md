@@ -168,177 +168,205 @@ B 的 fragment 同样要沿 K 的 4 个相邻元素进同一个 b32。`[32][8]` 
 
 ---
 
-# Section 1 · Problem 1.4 —— ldmatrix：把 6 条手工装载换成 2 条单指令
+# Section 1 · Problem 1.2 —— m16n8k16 fp16：A 下半行装错了会怎样
+
+> 配套代码:`cuda/m1_sm80/02_bug_fragment.cu`
+> 判测:`make ARCH=120a bin/m1_sm80/02_bug_fragment && srun -p lcpu-infra --gpus=1 ./bin/m1_sm80/02_bug_fragment`
+> 修好后 → **PASS**(仓库里当前版本已修)
+
+`m16n8k16` fp16 MMA。B 的装载和 D 的写回都是对的;bug 只在 A 的下半行。对着下面两段代码看就够了。
+
+---
+
+## 1. 错的 vs 对的
+
+四象限提醒:`a0,a1` / `a4,a5` 管行 `group`;`a2,a3` / `a6,a7` 管行 `group+8`。
+
+**原来(错):**`a2,a3,a6,a7` 又读了一遍上行,漏了 `(group+8)`。
+
+```
+a0 = A[group * 16 + tig * 2];
+a1 = A[group * 16 + tig * 2 + 1];
+a2 = A[group * 16 + tig * 2];          // 错
+a3 = A[group * 16 + tig * 2 + 1];      // 错
+a4 = A[group * 16 + tig * 2 + 8];
+a5 = A[group * 16 + tig * 2 + 9];
+a6 = A[group * 16 + tig * 2 + 8];      // 错
+a7 = A[group * 16 + tig * 2 + 9];      // 错
+```
+
+**修好(对):**只有这四行改成 `(group + 8) * 16 + …`,其余不动。
+
+```
+a0 = A[group * 16 + tig * 2];
+a1 = A[group * 16 + tig * 2 + 1];
+a2 = A[(group + 8) * 16 + tig * 2];
+a3 = A[(group + 8) * 16 + tig * 2 + 1];
+a4 = A[group * 16 + tig * 2 + 8];
+a5 = A[group * 16 + tig * 2 + 9];
+a6 = A[(group + 8) * 16 + tig * 2 + 8];
+a7 = A[(group + 8) * 16 + tig * 2 + 9];
+```
+
+差就差在:`a2,a3,a6,a7` 的行号是不是 `group+8`。
+
+---
+
+## 2. (a) 症状
+
+跑 buggy 版本:
+
+- `D` 上半行 `0..7` 全对
+- 下半行 `8..15` 整块等于上半:`got[r+8][n] == got[r][n]`
+- 相对 ref 大约 `59/128` 个 mismatch(少数格碰巧 `A[r]·B == A[r+8]·B`)
+
+host 故意让 A 上下半不同,所以「下行装成上行」会在 D 上直接变成复印件。
+
+---
+
+## 3. (b) 为什么是这个症状
+
+`d0,d1` 写 `D[group][…]`,靠的是上行 A(`a0,a1,a4,a5`)→ 上半对。  
+`d2,d3` 写 `D[group+8][…]`,靠的是下行 A(`a2,a3,a6,a7`)→ 错装成上行之后,算出来的正好是 `D[group]` 那一份,所以下半 = 上半。
+
+---
+
+## 4. D 写回长什么样(顺手对照)
+
+K 在 MMA 里已经消掉了;每 lane 4 个 f32 是 4 个算完的 `D[m][n]`:
+
+```
+d[0], d[1]  →  同一行、相邻两列
+d[2], d[3]  →  行号 +8、同样两列
+```
+
+```
+D[group * 8 + tig * 2]           = d[0];  // 行 group,   列 tig*2
+D[group * 8 + tig * 2 + 1]       = d[1];
+D[(group + 8) * 8 + tig * 2]     = d[2];  // 行 group+8, 列 tig*2
+D[(group + 8) * 8 + tig * 2 + 1] = d[3];
+```
+
+固定某个 `group`,`tig=0..3` 四人合起来:
+
+```
+        列 0,1    2,3    4,5    6,7
+行 g      tig0   tig1   tig2   tig3     ← d0,d1
+行 g+8    tig0   tig1   tig2   tig3     ← d2,d3
+```
+
+---
+
+# Section 1 · Problem 1.4 —— ldmatrix
 
 > 配套代码:`cuda/m1_sm80/04_ldmatrix.cu`
 > 判测:两条路径各跑 3 个 seed(1,7,42),全 PASS 才算过
-> 运行(5090 集群必须 ARCH=120a + 申请 GPU):
+> 运行:
 > ```
 > cd assignment02/cuda
 > make ARCH=120a bin/m1_sm80/04_ldmatrix && srun -p lcpu-infra --gpus=1 ./bin/m1_sm80/04_ldmatrix
 > ```
 
-## 0. 题目在问什么
-
-把 1.3 的 kernel 拆成**两个装载函数**,共存、分别判测:
-
-- `load_manual` —— 1.3 的手工装载(公式来自 1.1),逐寄存器算地址、逐条 load
-- `load_ldsm` —— 用 `ldmatrix` 指令装载
-
-都 PASS 之后,`make ptx` 反汇编数两条路径的指令,回答:ldmatrix 省掉了什么、为什么手工路径绕不开。
-
-骨架里数据已经从 global 拷进 smem(三块:`sA` 行主序、`sBk` k-major、`sBn` n-major 转置),两个函数都**从 smem 读**。
-
-## 1. 前置:地址空间,别搞混
-
-三个地方,方向是单向向下的:
+## 0. 矩阵形状
 
 ```
-global (dA, dB)
-   ↓ 拷贝循环 sA[i] = A[i]         ← st(寄存器 → smem)
-smem  (sA, sBk, sBn)
-   ↓ load_manual / load_ldsm       ← ld(smem → 寄存器)
-寄存器 (a[0..3], b[0..1])
-   ↓ mma 指令
-寄存器 (d[0..3]) → 写回 global
+mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32
+D[16×8] = A[16×32] × B[32×8] + C
 ```
 
-关键:**`a[0..3]`/`b[0..1]` 是寄存器**,不是 smem 的别名。`ldsm`(ldmatrix)= **从 smem 读进寄存器**(`ld` + `sm` = load from shared memory),方向跟名字直觉相反——不是"load 到 smem"。
+| 矩阵 | 形状 | smem |
+|------|------|------|
+| A | 16×32 e4m3 | `sA` 行主序 |
+| B | 32×8 e4m3 | `sBn` n-major(本题 ldmatrix 用这个) |
+| D | 16×8 f32 | 写回 global |
 
-## 2. ldmatrix 接口(前置知识)
+`load_ldsm` 的工作:从 smem 把 A、B 装进每人的 `a[0..3]`、`b[0..1]`,布局对齐课上的 fragment 四色图,然后发 `mma`。
 
-```
-ldmatrix.sync.aligned.m8n8.xN.shared.b16
-```
+---
 
-- **`m8n8`**:一个 tile = 8 行 × 8 列 b16 = 128 字节;每行 = 16 字节连续。
-- **`.xN`** = 一次装 N 个 tile,每个 lane 输出 N 个 b32 寄存器。**选 N = fragment 需要的寄存器数**:A 要 4 个 → `.x4`;B 要 2 个 → `.x2`。
-- **`.b16`**:元素 16 bit。fp8 的 4 字节 = 2 个 b16,硬件只读原始 bit、不认类型。
-- **输入**:每个 lane 给**一个 16 字节对齐的 smem 行地址**。32 个 lane 按 8 人一组(组号 = lane/8),每组 8 人出 8 个行地址 = 一个 tile 的 8 行。
-- **`.trans`**:把 16 字节行解释成 tile 的列(转置)。我们 smem 行的连续方向已经 = K 方向(fragment 想要的打包方向),所以**不用 .trans**。
+## 1. ldmatrix 在干什么
 
-## 3. 两个关键决策
+每个 lane 算好 **一个** A 行首 `aAddr`、**一个** B 行首 `bAddr`,交给指令。指令从这些行首把数据读进寄存器,并按 fragment 图拆开。软件侧到交地址为止。
 
-### 3.1 B 必须用 `sBn`,不用 `sBk`
+### 1.1 对着 A 四色图
 
-B 的 fragment 要求「一个寄存器 = 沿 K 连续 4 个 fp8」,ldmatrix 要求「行地址指向 16 字节连续」。
+| 色块 | 寄存器 | 行 | K(本题 e4m3,一行 32 byte) |
+|------|--------|----|---------------------------|
+| 绿 | `a[0]` | 0..7 | 左半,从 col 0 起 16 byte |
+| 紫 | `a[1]` | 8..15 | 左半,从 col 0 起 16 byte |
+| 蓝 | `a[2]` | 0..7 | 右半,从 col 16 起 16 byte |
+| 橙 | `a[3]` | 8..15 | 右半,从 col 16 起 16 byte |
 
-- `sBk` k-major:`B[k][n]`,固定 n 时 k+1 内存里隔 8 字节 → 沿 K 的邻居不连续,**16 字节行凑不出 K 段**,也凑不出「K 相邻成对进 b16」。
-- `sBn` n-major:`B^T[n][k]`,每个 n 的 32 个 k 连续 → 16 字节行 = 16 个连续 k,正好是 fragment 要的。**所以 ldmatrix 路径用 sBn**(手工路径两个都行)。
+每个色块 = **8 行** × **半段 K(16 byte)**。
 
-### 3.2 A、B 的行地址公式
+### 1.2 指令要的「行」是什么
 
-`lane` 按 8 人分组:组号 `r = lane/8`,组内 `row8 = lane%8`。每组出一个 16 字节行地址。
+- 一条行 = smem 里 **16 byte 连续** 的一段。本题半段 K 正好 16 个 e4m3 = 16 byte。
+- 一个色块要 **8** 条这样的行(图上每个色块 8 行)。
+- A 发 `.x4`:一次装齐四个色块 → **32** 条行首 → 32 个 lane,每人交一条。
+- B 发 `.x2`:装 `b[0]`、`b[1]` 两个半区 → **16** 条行首;lane 0..15 的地址参与分发。
 
-**A(`sA` [16][32] 行主序,`.x4`)**。四组地址对应四个象限:
-
-```
-lanes  0..7  → a[0]  上半(rows 0-7)    K 左半(k=0..15)     → offset =  row8*32
-lanes  8..15 → a[1]  下半(rows 8-15)    K 左半              → offset = (row8+8)*32
-lanes 16..23 → a[2]  上半               K 右半(k=16..31)    → offset =  row8*32 + 16
-lanes 24..31 → a[3]  下半               K 右半              → offset = (row8+8)*32 + 16
-```
-
-合成:`offset = (row8 + 8*(r%2))*32 + 16*(r/2)`(行偏移跟 `r%2`,K 半区跟 `r/2`)。
-
-**B(`sBn` [8][32] n-major,`.x2`)**。只用 r=0,1 两组地址(后两组被忽略,给合法值即可):
+### 1.3 代码里两个整数
 
 ```
-lanes  0..7  → b[0]  K 上半(k=0..15)   → offset = row8*32
-lanes  8..15 → b[1]  K 下半(k=16..31)  → offset = row8*32 + 16
+quad        = lane / 8   // 0绿 1紫 2蓝 3橙:这条地址喂哪个色块
+row_in_quad = lane % 8   // 该色块内第几行(0..7)
 ```
 
-## 4. PTX 反汇编统计(只数 smem → fragment)
-
-口径钉死,避免把拷贝循环、mma、写回 D 算进来:
-
-- 文件:`make ptx/m1_sm80/04_ldmatrix` 生成的 `m1_sm80/04_ldmatrix.ptx`
-- 区间:`bar.warp.sync` 之后、`mma.sync` 之前(C 清零的 `mov.f32` 也不算)
-- **装载** = `ld.shared` / `ldmatrix`
-- **地址计算** = 从 `lane`(`%tid.x`)算出 smem 指针的 `shl`/`and`/`or`/`add`(基址 `mov` 单独列,不算进算术)
-
-`mma_kernel<false>` = 手工,`mma_kernel<true>` = ldmatrix。
-
-### 4.1 手工路径(PTX 原文,`$L__BB1_6` 之后)
+**A**(`sA[row*32 + col]`):
 
 ```
-shl.b32  %r22, %r1, 3
-and.b32  %r23, %r22, 8160      // gid*32 那一段
-shl.b32  %r24, %r1, 2
-and.b32  %r25, %r24, 12        // 4*tig
-or.b32   %r26, %r23, %r25      // offset = gid*32 + 4*tig
-mov.u32  %r27, sA
-add.s32  %r28, %r27, %r26      // A 基址
-ld.shared.u32 %r16, [%r28]         // a[0] 左上
-ld.shared.u32 %r17, [%r28+256]     // a[1] 左下  8*32=256,折进立即数
-ld.shared.u32 %r18, [%r28+16]      // a[2] 右上  K+16
-ld.shared.u32 %r19, [%r28+272]     // a[3] 右下  256+16
-mov.u32  %r29, sBn
-add.s32  %r30, %r29, %r26      // B 复用同一个 offset
-ld.shared.u32 %r20, [%r30]         // b[0]
-ld.shared.u32 %r21, [%r30+16]      // b[1] K+16
+a_row = row_in_quad + 8 * (quad % 2)   // 紫/橙行号 +8
+a_col = 16 * (quad / 2)                // 蓝/橙从 col 16 起
+aAddr → &sA[a_row * 32 + a_col]
 ```
 
-| 类 | 条数 | 明细 |
-|---|---|---|
-| 装载 | **6** | 6× `ld.shared.u32`(A 四象限 + B 两个半区) |
-| 地址算术 | **7** | 5 条算 `offset` + 2 条 `base+offset` |
-| 基址 mov | 2 | `sA`、`sBn` |
-
-象限之间的 `+8 行` / `+16 列` 被编译器折进 `[%r28+256]` 这类立即数,**不再占算术指令**。A 和 B 的 n-major 下标碰巧同形(`gid*32+4*tig`),所以 B 几乎白嫖 A 的 offset。
-
-### 4.2 ldmatrix 路径(PTX 原文,`$L__BB0_6` 之后)
+**B**(`sBn` 一行 = 某个 n 的 32 个 k):
 
 ```
-and.b32  %r30, %r1, 1008
-shl.b32  %r31, %r1, 5
-and.b32  %r32, %r31, 480
-add.s32  %r33, %r32, %r30      // A: (row8+8*(r%2))*32 + 16*(r/2)
-mov.u32  %r34, sA
-add.s32  %r20, %r34, %r33
-ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r16,%r17,%r18,%r19}, [%r20];
-shl.b32  %r35, %r1, 1
-and.b32  %r36, %r35, 16
-and.b32  %r37, %r31, 224       // 复用上面的 shl %r31
-or.b32   %r38, %r37, %r36      // B: row8*32 + 16*(r%2)
-mov.u32  %r39, sBn
-add.s32  %r23, %r39, %r38
-ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r21,%r22}, [%r23];
+b_n = row_in_quad          // 当作列号 n
+b_k = 16 * (quad % 2)      // 上半 K / 下半 K
+bAddr → &sBn[b_n * 32 + b_k]
 ```
 
-| 类 | 条数 | 明细 |
-|---|---|---|
-| 装载 | **2** | 1× `.x4`(A 四个半区) + 1× `.x2`(B 两个半区) |
-| 地址算术 | **10** | A 5 条 + B 5 条(`%r31` 两边共用,仍计 1 次 shl) |
-| 基址 mov | 2 | `sA`、`sBn` |
+---
 
-每人只交 **一个** 行首;A、B 的分组公式不同(8 人一组 vs 手工的 gid/tig),编译器折不了那么多立即数,所以算术条数比手工还多。
-
-### 4.3 对照表(本题要交的两个数)
-
-| 路径 | 装载指令 | 地址计算指令 |
-|---|---|---|
-| 手工 | **6** (`ld.shared.u32`) | **7** |
-| ldmatrix | **2** (`ldmatrix` ×2) | **10** |
-
-省掉的是装载:**6 → 2**。地址算术没有变少——ldmatrix 省的是「按寄存器一条条去 smem」,每人仍要算行首。之前若把整核的 shl/add(含拷贝循环、写回 D)加在一起,会得到十好几、两条路径差不多,那种口径混了别的阶段。
-
-## 5. 报告两问的答案
-
-**(a) ldmatrix 省掉的是哪些工作?**
-装载从 **6 条 `ld.shared` 降到 2 条 `ldmatrix`**:A 的 4 个 b32 一条 `.x4` 装完,B 的 2 个一条 `.x2`。基本块是 8 行 × 16 byte(一个半区);`.x4` 收 32 个行首,`.x2` 收 16 个行首,再按 fragment 图拆开。地址算术在 PTX 里反而是 7 → 10:每人仍要算行首,A/B 公式不同,立即数也折不掉手工路径那种 `+256/+16`。省的是「按寄存器去 smem」,不是「不算地址」。
-
-**(b) 为什么这些工作在手工路径里无法避免?**
-手工路径里「算地址 + 取数」是逐寄存器、逐 lane 独立重复的:一个 fragment 有 6 个 b32,就至少 6 条 load。而「一次读多行 + 跨 lane 分发成 fragment」这件事,软件层没有对应指令——要么每条 lane 各读各的字节(条数随 fragment 线性涨),要么靠寄存器 shuffle(照样要额外指令)。ldmatrix 是硬件专门把「读行 + 分发」合成一条的指令,这就是它不可替代的原因。
-
-## 6. 小结
+## 2. 数据从哪到哪
 
 ```
-手工路径:每个 lane 自己算地址、自己 ld.shared;一条 load 填一个 b32,
-         条数跟着寄存器走(A 4 条 + B 2 条)。
-ldmatrix:32 个 lane 各交一个「16 byte 连续行」的行首,一条 warp 指令收齐再按图拆开。
-         8 行 × 16 byte = 一个半区(一块 m8n8.b16);
-         .x4(A) = 4 个半区、32 个行首; .x2(B) = 2 个半区、16 个行首。
+global → smem(sA, sBn) → ldmatrix → 寄存器 a[]/b[] → mma → d[] → global
 ```
 
-1.4 的实质:**把 1.1 的「一个寄存器 = 一段连续 K」交给专门搬「连续 16 byte 行」的指令去做**。smem 的连续维要是 K(A 行主序已经满足,B 用 sBn 转置);每个 lane 交出的行首要对上它负责的那个半区。
+`ldmatrix` = load from shared memory:从 smem 读进寄存器。
+
+B 用 `sBn`(n-major):每个 n 的 K 连续,16 byte 行才能沿 K 取齐。`sBk` 沿 K 步长是 8,拼不成这种行。
+
+---
+
+## 3. PTX 计数(报告用)
+
+口径:`bar.warp.sync` 之后、`mma.sync` 之前;只数装载与从 `lane` 算指针的算术。
+
+| 路径 | 装载 | 地址算术 |
+|------|------|----------|
+| `load_manual` | 6× `ld.shared.u32` | 7 |
+| `load_ldsm` | 1× `.x4` + 1× `.x2` | 10 |
+
+`load_ldsm` 的 PTX 大意:算出 `aAddr` → 一条 `ldmatrix.x4`;算出 `bAddr` → 一条 `ldmatrix.x2`。
+
+### 报告两问(简答)
+
+**(a)** A 四个色块一条 `.x4` 装完,B 两个半区一条 `.x2` 装完;装载指令从 6 条变成 2 条。每人仍要算自己那条行首(本题地址算术 10 条)。
+
+**(b)** 「读多行 + 按 fragment 图写入各 lane 寄存器」由这条硬件指令一次做完;普通 `ld.shared` 一次只填本 lane 的一个寄存器宽度。
+
+---
+
+## 4. 小结
+
+```
+每个 lane:算 aAddr、bAddr → ldmatrix
+A .x4:四个色块 × 每块 8 行 = 32 行首
+B .x2:两个半区 × 每块 8 行 = 16 行首
+一行 = 16 byte = 本题半段 K
+```
