@@ -22,22 +22,19 @@
 // 个 k 字节连续)。手工路径用哪种都行;ldmatrix 的每个"行地址"要求
 // 16 byte 连续,B 的 fragment 需要 k 方向相邻的字节成对进 b16——
 // 想清楚哪种布局能满足它。
-//
-// TODO: 实现两个装载函数。
+
 __device__ void load_manual(const uint8_t* sA, const uint8_t* sBk,
                             const uint8_t* sBn, unsigned (&a)[4],
                             unsigned (&b)[2]) {
     (void)sBk;
     int lane = threadIdx.x;
-    int gid = lane / 4;  // 一组 4 个 lane（32 / N=8）
+    int gid = lane / 4;
     int tig = lane % 4;
 
-    // A 四象限,每寄存器 4 个沿 K 的 fp8: r0 左上, r1 左下, r2 右上, r3 右下
     a[0] = *(const unsigned*)&sA[gid * 32 + 4 * tig];
     a[1] = *(const unsigned*)&sA[(gid + 8) * 32 + 4 * tig];
     a[2] = *(const unsigned*)&sA[gid * 32 + 4 * tig + 16];
     a[3] = *(const unsigned*)&sA[(gid + 8) * 32 + 4 * tig + 16];
-    // B 用 sBn(n-major,K 连续)。r=0 上半 K, r=1 下半 K(+16)
     b[0] = *(const unsigned*)&sBn[gid * 32 + 4 * tig];
     b[1] = *(const unsigned*)&sBn[gid * 32 + 4 * tig + 16];
 }
@@ -46,39 +43,46 @@ __device__ void load_ldsm(const uint8_t* sA, const uint8_t* sBk,
                           const uint8_t* sBn, unsigned (&a)[4],
                           unsigned (&b)[2]) {
     (void)sBk;
-    int lane = threadIdx.x;
-    // ------------------------------------------------------------------
-    // ldmatrix 每人只交一个「16 byte 连续行」的行首。交完就完事;硬件按
-    // fragment 图拆进 a[]/b[]。
+    // ----------------------------------------------------------------
+    // ldmatrix 地址语义:每个 lane 交「一条 16 byte 连续行」的行首。
+    // 32 个 lane 一起执行同一条指令,各自带自己的地址。
     //
-    // 对着 A 的四色图(绿a[0]/紫a[1]/蓝a[2]/橙a[3]):每个色块是 8 行 ×
-    // 半段 K。.x4 = 一次装齐四个色块 → 需要 4×8 = 32 个行首 → 正好 32 lane
-    // 一人交一条。
+    // A 用 .x4 = 一次装四个色块。每个色块要 8 条行首 → 共 32 条。
+    // 不是「只交象限左上角、其余行由硬件推」——8 个 lane 各交不同的一行:
+    //   lane 0 交 row0, lane 1 交 row1, …, lane 7 交 row7(左上,col=0)
+    //   lane 8..15 同理交左下 8 行;16..23 右上;24..31 右下。
+    // 右半色块的行首在 col=16(K 右半 16 byte),不是 col=0。
     //
-    //   quad        = 我负责哪个色块(= 图上的 r,也是写进 a[quad] 的那个)
-    //   row_in_quad = 这个色块里第几行(0..7)——图上每个色块恰好 8 行
-    //
-    // 本题 e4m3、K=32:一行 32 byte,半段 K = 16 byte = 一条 ldmatrix 行。
-    // (课上 fp16/K=16 的图半段是 8 个 fp16 = 16 byte,同构。)
-    // ------------------------------------------------------------------
-    int quad = lane / 8;        // 0绿 1紫 2蓝 3橙
-    int row_in_quad = lane % 8; // 色块内行号 0..7
-
-    // A: sA[16][32] 行主序。行随上下半色块 +0/+8;列随左右半色块 +0/+16。
-    int a_row = row_in_quad + 8 * (quad % 2);  // 紫/橙在下半
-    int a_col = 16 * (quad / 2);               // 蓝/橙在 K 右半
-    uint32_t aAddr = __cvta_generic_to_shared(&sA[a_row * 32 + a_col]);
+    // 课上 fp16/K=16:stride=16、半段宽=8;本题 e4m3/K=32:stride=32、半段=16。
+    // ----------------------------------------------------------------
+    const int lane = threadIdx.x % 32;
+    int row = lane % 16;           // 矩阵行 0..15(lane 16..31 折回 0..15)
+    int col = (lane / 16) * 16;    // 0→左半色块, 16→右半色块
+    // [%reg] 要 shared 空间 32-bit 地址;C 指针是 generic,这里做转换。
+    uint32_t aAddr =
+        static_cast<uint32_t>(__cvta_generic_to_shared(&sA[row * 32 + col]));
     asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 "
                  "{%0,%1,%2,%3}, [%4];\n"
                  : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3])
                  : "r"(aAddr));
 
-    // B: sBn[8][32],一行 = 某个 n 的 32 个 k。.x2 只要两个「8 行」半区
-    // (b[0] 上半 K、b[1] 下半 K)→ 16 个行首;lane 0..15 有用,16..31 填合法地址即可。
-    // 这里的「行」是 n:row_in_quad 当 n;quad%2 选 K 半区(+0 / +16)。
-    int b_n = row_in_quad;
-    int b_k = 16 * (quad % 2);
-    uint32_t bAddr = __cvta_generic_to_shared(&sBn[b_n * 32 + b_k]);
+    // ----------------------------------------------------------------
+    // B:逻辑上是 K×N = 32×8。放进 sBn 后变成 n-major:[8][32],
+    //   纵向下标 = n(0..7),横向 = k(0..31 连续)。
+    //
+    // .x2 = 两个「8 行 × 16 byte」小块 → b[0]、b[1]:
+    //   小块0: n=0..7 各取 k[0..15]   (沿 K 左半 / 在 sBn 一行里左 16B)
+    //   小块1: n=0..7 各取 k[16..31]  (沿 K 右半 / 在 sBn 一行里右 16B)
+    // 也就是:8 个 n 当 ldmatrix 的「8 行」,再按 K 左右劈成两刀。
+    //
+    // lane 0..7  → 小块0:交 &sBn[n*32 + 0],  n = lane%8
+    // lane 8..15 → 小块1:交 &sBn[n*32 + 16]
+    // lane 16..31 也要交合法地址(.x2 只用前 16 个 lane 的行首)。
+    // ----------------------------------------------------------------
+    int n = lane % 8;
+    int k = ((lane / 8) % 2) * 16;
+    uint32_t bAddr =
+        static_cast<uint32_t>(__cvta_generic_to_shared(&sBn[n * 32 + k]));
     asm volatile("ldmatrix.sync.aligned.m8n8.x2.shared.b16 "
                  "{%0,%1}, [%2];\n"
                  : "=r"(b[0]), "=r"(b[1])
@@ -91,7 +95,7 @@ __global__ void mma_kernel(const uint8_t* A, const uint8_t* B, float* D) {
     for (int i = threadIdx.x; i < 16 * 32; i += 32) sA[i] = A[i];
     for (int i = threadIdx.x; i < 32 * 8; i += 32) {
         sBk[i] = B[i];
-        sBn[(i & 7) * 32 + (i >> 3)] = B[i];  // 转成 n-major
+        sBn[(i % 8) * 32 + (i / 8)] = B[i];  // k-major → n-major
     }
     __syncwarp();
     unsigned a[4], b[2];
