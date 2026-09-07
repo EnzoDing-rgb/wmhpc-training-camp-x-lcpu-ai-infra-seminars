@@ -248,40 +248,85 @@ lanes  0..7  → b[0]  K 上半(k=0..15)   → offset = row8*32
 lanes  8..15 → b[1]  K 下半(k=16..31)  → offset = row8*32 + 16
 ```
 
-## 4. PTX 反汇编统计(真实输出)
+## 4. PTX 反汇编统计(只数 smem → fragment)
+
+口径钉死,避免把拷贝循环、mma、写回 D 算进来:
+
+- 文件:`make ptx/m1_sm80/04_ldmatrix` 生成的 `m1_sm80/04_ldmatrix.ptx`
+- 区间:`bar.warp.sync` 之后、`mma.sync` 之前(C 清零的 `mov.f32` 也不算)
+- **装载** = `ld.shared` / `ldmatrix`
+- **地址计算** = 从 `lane`(`%tid.x`)算出 smem 指针的 `shl`/`and`/`or`/`add`(基址 `mov` 单独列,不算进算术)
+
+`mma_kernel<false>` = 手工,`mma_kernel<true>` = ldmatrix。
+
+### 4.1 手工路径(PTX 原文,`$L__BB1_6` 之后)
 
 ```
-cd assignment02/cuda
-make ptx/m1_sm80/04_ldmatrix      # 生成 m1_sm80/04_ldmatrix.ptx
+shl.b32  %r22, %r1, 3
+and.b32  %r23, %r22, 8160      // gid*32 那一段
+shl.b32  %r24, %r1, 2
+and.b32  %r25, %r24, 12        // 4*tig
+or.b32   %r26, %r23, %r25      // offset = gid*32 + 4*tig
+mov.u32  %r27, sA
+add.s32  %r28, %r27, %r26      // A 基址
+ld.shared.u32 %r16, [%r28]         // a[0] 左上
+ld.shared.u32 %r17, [%r28+256]     // a[1] 左下  8*32=256,折进立即数
+ld.shared.u32 %r18, [%r28+16]      // a[2] 右上  K+16
+ld.shared.u32 %r19, [%r28+272]     // a[3] 右下  256+16
+mov.u32  %r29, sBn
+add.s32  %r30, %r29, %r26      // B 复用同一个 offset
+ld.shared.u32 %r20, [%r30]         // b[0]
+ld.shared.u32 %r21, [%r30+16]      // b[1] K+16
 ```
 
-在 PTX 里,两个模板实例的内核体(`mma_kernel<true>` = ldsm 路径,`mma_kernel<false>` = manual 路径)的 **smem→fragment 段**:
+| 类 | 条数 | 明细 |
+|---|---|---|
+| 装载 | **6** | 6× `ld.shared.u32`(A 四象限 + B 两个半区) |
+| 地址算术 | **7** | 5 条算 `offset` + 2 条 `base+offset` |
+| 基址 mov | 2 | `sA`、`sBn` |
 
-**ldsm 路径:**
+象限之间的 `+8 行` / `+16 列` 被编译器折进 `[%r28+256]` 这类立即数,**不再占算术指令**。A 和 B 的 n-major 下标碰巧同形(`gid*32+4*tig`),所以 B 几乎白嫖 A 的 offset。
+
+### 4.2 ldmatrix 路径(PTX 原文,`$L__BB0_6` 之后)
+
 ```
+and.b32  %r30, %r1, 1008
+shl.b32  %r31, %r1, 5
+and.b32  %r32, %r31, 480
+add.s32  %r33, %r32, %r30      // A: (row8+8*(r%2))*32 + 16*(r/2)
+mov.u32  %r34, sA
+add.s32  %r20, %r34, %r33
 ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r16,%r17,%r18,%r19}, [%r20];
+shl.b32  %r35, %r1, 1
+and.b32  %r36, %r35, 16
+and.b32  %r37, %r31, 224       // 复用上面的 shl %r31
+or.b32   %r38, %r37, %r36      // B: row8*32 + 16*(r%2)
+mov.u32  %r39, sBn
+add.s32  %r23, %r39, %r38
 ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r21,%r22}, [%r23];
 ```
 
-**manual 路径:**
-```
-ld.shared.u32 %r16, [%r28];        ← A 的 4 条
-ld.shared.u32 %r17, [%r28+256];
-ld.shared.u32 %r18, [%r28+16];
-ld.shared.u32 %r19, [%r28+272];
-ld.shared.u32 %r20, [%r30];        ← B 的 2 条
-ld.shared.u32 %r21, [%r30+16];
-```
+| 类 | 条数 | 明细 |
+|---|---|---|
+| 装载 | **2** | 1× `.x4`(A 四个半区) + 1× `.x2`(B 两个半区) |
+| 地址算术 | **10** | A 5 条 + B 5 条(`%r31` 两边共用,仍计 1 次 shl) |
+| 基址 mov | 2 | `sA`、`sBn` |
 
-| 路径 | `ld.shared`(装载条数) | `ldmatrix` | 地址算术(shl/mul/add) |
-|---|---|---|---|
-| manual | **6**(A 4 + B 2) | 0 | 16(含 kernel 其他部分,编译器已把部分折成 `[%r28+256]` 立即数) |
-| ldsm | **0** | **2**(一条 `.x4` + 一条 `.x2`) | 18(同上,含 kernel 其他部分) |
+每人只交 **一个** 行首;A、B 的分组公式不同(8 人一组 vs 手工的 gid/tig),编译器折不了那么多立即数,所以算术条数比手工还多。
+
+### 4.3 对照表(本题要交的两个数)
+
+| 路径 | 装载指令 | 地址计算指令 |
+|---|---|---|
+| 手工 | **6** (`ld.shared.u32`) | **7** |
+| ldmatrix | **2** (`ldmatrix` ×2) | **10** |
+
+省掉的是装载:**6 → 2**。地址算术没有变少——ldmatrix 省的是「按寄存器一条条去 smem」,每人仍要算行首。之前若把整核的 shl/add(含拷贝循环、写回 D)加在一起,会得到十好几、两条路径差不多,那种口径混了别的阶段。
 
 ## 5. 报告两问的答案
 
 **(a) ldmatrix 省掉的是哪些工作?**
-6 条逐寄存器 `ld.shared` → 2 条 `ldmatrix`(A 的 4 个 b32 一次 `.x4` 装完,B 的 2 个 b32 一次 `.x2`);每个寄存器独立的地址计算 → 每人只算一个地址;以及「一次只服务一个 lane 的 4 字节」的粒度——ldmatrix 一次并行读 8 行 × 16 字节,并在 warp 内按 fragment 布局分发。
+装载从 **6 条 `ld.shared` 降到 2 条 `ldmatrix`**:A 的 4 个 b32 一条 `.x4` 装完,B 的 2 个一条 `.x2`。基本块是 8 行 × 16 byte(一个半区);`.x4` 收 32 个行首,`.x2` 收 16 个行首,再按 fragment 图拆开。地址算术在 PTX 里反而是 7 → 10:每人仍要算行首,A/B 公式不同,立即数也折不掉手工路径那种 `+256/+16`。省的是「按寄存器去 smem」,不是「不算地址」。
 
 **(b) 为什么这些工作在手工路径里无法避免?**
 手工路径里「算地址 + 取数」是逐寄存器、逐 lane 独立重复的:一个 fragment 有 6 个 b32,就至少 6 条 load。而「一次读多行 + 跨 lane 分发成 fragment」这件事,软件层没有对应指令——要么每条 lane 各读各的字节(条数随 fragment 线性涨),要么靠寄存器 shuffle(照样要额外指令)。ldmatrix 是硬件专门把「读行 + 分发」合成一条的指令,这就是它不可替代的原因。
@@ -289,8 +334,11 @@ ld.shared.u32 %r21, [%r30+16];
 ## 6. 小结
 
 ```
-手工路径:地址算术 + 逐条 load,指令数 ∝ fragment 寄存器数
-ldmatrix: 一条指令 = 8 行 smem 并行读 + warp 内分发,fragment 直接成形
+手工路径:每个 lane 自己算地址、自己 ld.shared;一条 load 填一个 b32,
+         条数跟着寄存器走(A 4 条 + B 2 条)。
+ldmatrix:32 个 lane 各交一个「16 byte 连续行」的行首,一条 warp 指令收齐再按图拆开。
+         8 行 × 16 byte = 一个半区(一块 m8n8.b16);
+         .x4(A) = 4 个半区、32 个行首; .x2(B) = 2 个半区、16 个行首。
 ```
 
-1.4 的实质:**把 1.1 的「寄存器 = 一段连续 K」这条打包规律,交给专门为「搬连续 16 字节行」设计的硬件指令去执行**。前提是 smem 的连续维 = K(A 天然满足,B 要转置成 sBn),并且 lane 组的地址指向正确的象限(寄存器↔tile 映射)。
+1.4 的实质:**把 1.1 的「一个寄存器 = 一段连续 K」交给专门搬「连续 16 byte 行」的指令去做**。smem 的连续维要是 K(A 行主序已经满足,B 用 sBn 转置);每个 lane 交出的行首要对上它负责的那个半区。
