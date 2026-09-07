@@ -800,20 +800,20 @@ conflicts(N)   = wavefronts − W0 = (N − 1) × 8192
 
 ## 6. 为什么 wavefront ×4 不会让耗时也 ×4
 
-表上 64B 的 wavefront 是 pad 的 **4 倍**,但 8 warp 均摊 cycle 只从 ~9.4 到 ~10.9;128B 是 ×8 wavefront,cycle 也只到 ~16。计数器跟墙钟不是同一件事——这点两边都能同意。但「8 warp 到底把差距盖住了还是放大了」,必须对着代码注释 **实测**,不能靠直觉编。
+表上 64B 的 wavefront 是 pad 的 **4 倍**,但 8 warp 均摊 cycle 只从 ~9.4 到 ~10.9;128B 是 ×8 wavefront,cycle 约 ~16。wavefront 跟均摊 cycle 量的不是同一件事;下面按源码注释,并用 1 warp / 8 warp 实测把机制说清。
 
-### 6.1 先看源码自己怎么说
+### 6.1 源码在说什么
 
 `05_ldsm_stride.cu` 里两处提示(大意):
 
-1. 耗时的比值会比 wavefront 比值 **小**;问你:8 warp 占用下,Load/Store Unit **是不是唯一瓶颈**。
-2. **8 个 warp 同发把 Load/Store Unit 打满,吞吐由 bank 冲突决定;单 warp 的话流水会把串行化掩掉大半。**
+1. 耗时比值会小于 wavefront 比值;并追问:8 warp 占用下,Load/Store Unit 是否已是唯一瓶颈。
+2. **8 个 warp 同发把 Load/Store Unit 打满,吞吐由 bank 冲突决定;单 warp 时流水会把串行化掩掉大半。**
 
-注意第二句的方向:**单 warp → 流水掩盖冲突串行化;多 warp → 打满通路,冲突更容易反映到吞吐/耗时上。** 这和「单 warp 时 cycle 差距会更刺眼」是反着的——下面用同一套 kernel 改 `WARPS` 实测裁决。
+含义:**1 warp → 流水空间大,冲突对墙钟影响小;8 warp → 通路打满,冲突更容易顶到耗时。**
 
 ### 6.2 实测:WARPS=1 vs WARPS=8(5090)
 
-把正式程序里的 `WARPS` / 线程数改成可切换后,同一台 `gj-5090-1` 上跑四档 `STRIDE`(仍 `ITERS=4096`,warmup + 正式,打印 `(t1-t0)/ITERS`):
+同一套 kernel,只改 `WARPS` / 线程数;`ITERS=4096`,warmup + 正式,打印 `(t1-t0)/ITERS`:
 
 | `STRIDE` | wavefront 相对 pad | **1 warp** cycle | 相对 pad | **8 warp** cycle | 相对 pad |
 |----------|--------------------|------------------|----------|------------------|----------|
@@ -822,45 +822,37 @@ conflicts(N)   = wavefronts − W0 = (N − 1) × 8192
 | 64 | 4× | 10.78 | 1.16× | 10.87 | 1.15× |
 | 128 | 8× | **12.78** | **1.38×** | **16.00** | **1.70×** |
 
-(正式提交的二进制是 8 warp 那一列,和上表一致。)
+(正式程序是 8 warp 列。)
 
-读表:
-
-- **两种占用下,cycle 比都远小于 wavefront 比**(没有谁跟成 2:4:8)。「计数器惨、时间没那么惨」对 1 warp / 8 warp **都成立**。
-- **最差档 128B:1 warp 只有 ~12.8 cycle,8 warp 反而到 ~16。** 差距在 8 warp 下 **更大**,不是更小。这正对应注释里的「单 warp 流水掩掉大半串行化 / 8 warp 把 Load/Store Unit 打满」。
-- 32B、64B 两档在 1/8 warp 下几乎一样(~9.8 / ~10.8):冲突还没重到把通路堵死,墙钟差主要被别的开销和流水叠掉。
-
-### 6.3 先前错误叙述(已推翻)
-
-曾有一版把 8 warp 理解成:「别的 warp 来填 Load/Store Unit 等待 → 墙钟更平坦;若改成 1 warp,cycle 差距会刺眼得多。」
-
-**实测否定了后半句。** 正确读注释应是:
+- 1 warp 与 8 warp 的 cycle 比都远小于 wavefront 比。
+- 128B:1 warp ~12.8 cycle,8 warp ~16 cycle——打满 Load/Store Unit 后,最差布局在墙钟上更明显。
+- 32B、64B 在两种占用下几乎相同(~9.8 / ~10.8):冲突尚轻,墙钟差主要被其它开销与流水叠掉。
 
 | | 1 warp | 8 warp(本题) |
 |--|--------|----------------|
-| Load/Store Unit | 吃不饱,单指令流水/重叠空间大 | 被打满 |
-| bank 冲突对 **cycle** | 大多被流水掩掉(128B 只 ~1.4×) | 更容易顶到吞吐(128B ~1.7×) |
-| 对 **wavefront** | 布局决定,倍数仍应按 N 走 | 同左 |
+| Load/Store Unit | 吃不饱,流水/重叠空间大 | 被打满 |
+| bank 冲突 → cycle | 影响小(128B ~1.4× pad) | 更容易顶吞吐(128B ~1.7×) |
+| wavefront 倍数 | 仍由布局 N 决定 | 同左 |
 
-本题放 8 warp,是为了让冲突 **有机会在耗时上露头**(并追问「是不是唯一瓶颈」),不是为了把耗时差距「盖得更平」。盖不住 wavefront 的 ×N、却仍远小于 ×N——两边都有;8 warp 只是让最差布局的 cycle 抬得更高一点。
+本题用 8 warp,是让冲突有机会在耗时上露头,并对照「Load/Store Unit 是否唯一瓶颈」。
 
-### 6.4 那 cycle 为什么仍远小于 wavefront ×N
+### 6.3 即便打满通路,cycle 仍远小于 wavefront ×N
 
-即便 8 warp 已打满通路,128B 也只到 ~1.7× 而不是 ×8:
+8 warp 下 128B 约 1.7× pad,不是 ×8:
 
-- **wavefront** 数的是「这条 shared 读在硬件上拆成多少拍」——跟 N 近似成正比。
-- **`clock64` 均摊** 数的是整段循环的墙钟 / `ITERS`,里面还有地址已算好后的发射、写回、`xor` 防优化、同步边界等;Load/Store Unit 忙 ≠ 整个 SM 按同样倍数空转。
-- 打印的是 block 内一次计时再均摊,不是「单次 `ldmatrix` 从发到数齐」的独占延迟。
+- **wavefront**:这条 shared 读在硬件上拆成多少拍,近似跟 N 成正比。
+- **`clock64` 均摊**:整段循环墙钟 / `ITERS`,还含发射、写回、`xor` 防优化、同步等;Load/Store Unit 忙,整段循环仍可与其它工作重叠。
+- 计时是 block 内一次再均摊,是平均每迭代墙钟。
 
-所以报告里应写:**用 ncu 验证布局(2:4:8:1 + pad conflict=0);用 cycle 说明即使打满 Load/Store Unit,墙钟仍不会跟 wavefront 同倍涨——但不要编造「1 warp 会更惨」;实测是 1 warp 更会把冲突藏进流水里。**
+**ncu** 用来确认布局(2:4:8:1,pad conflict=0);**cycle** 用来看该占用下墙钟涨多少——两者一起写。
 
-### 6.5 读数口诀
+### 6.4 读数口诀
 
 | 你想证明什么 | 看谁 |
 |--------------|------|
-| 行跨度 → bank 碰撞路数对不对 | **wavefront 比** 与 **conflict = (N−1)×W0**(pad 为 0) |
-| 冲突在本题占用下有多疼 | **cycle**(8 warp;仍 ≪ wavefront 比) |
-| 流水会不会把冲突藏起来 | **对照 1 warp**(实测:会,尤其 128B) |
+| 行跨度 → bank 碰撞路数 | **wavefront 比** 与 **conflict = (N−1)×W0**(pad 为 0) |
+| 本题占用下冲突有多疼 | **cycle**(8 warp;仍远小于 wavefront 比) |
+| 流水把冲突藏进墙钟多少 | **对照 1 warp**(128B:12.8 vs 16) |
 
 ---
 
@@ -871,7 +863,7 @@ conflicts(N)   = wavefronts − W0 = (N − 1) × 8192
 ncu: wavefronts = 实际 shared-load 拍数; conflicts ≈ wavefronts − W0
 W0 = 2 × ITERS = 8192(pad 档 conflict=0 标定); N 路 → W=N×W0, C=(N−1)×W0
 布局:32B→2×, 64B→4×, 128B→8×, 144B→1×(conflict=0)
-cycle ≪ wavefront 比(1 warp / 8 warp 皆然)
-8 warp 打满 Load/Store Unit → 最差档 cycle 比 1 warp 更明显(实测 16 vs 12.8);
-1 warp 流水掩串行化——不是「单 warp 差距更大」
+cycle 比远小于 wavefront 比(1 warp / 8 warp 皆然)
+8 warp 打满 Load/Store Unit → 最差档 cycle 更高(实测 16 vs 1 warp 的 12.8)
+1 warp 流水空间大 → 冲突对墙钟影响更小
 ```
