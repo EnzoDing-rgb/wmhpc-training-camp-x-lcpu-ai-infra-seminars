@@ -389,7 +389,8 @@ or.b32   %r38, %r37, %r36       // B: n*32 + k 半区
 mov.u32  %r39, sBn
 add.s32  %r23, %r39, %r38
 ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r21,%r22}, [%r23];
-mma.sync ... {%r16..%r19}, {%r21,%r22}, ...
+mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32
+    {%f1,%f2,%f3,%f4}, {%r16,%r17,%r18,%r19}, {%r21,%r22}, {%f8,%f8,%f8,%f8};
 ```
 
 | 类 | 条数 | 明细 |
@@ -398,7 +399,7 @@ mma.sync ... {%r16..%r19}, {%r21,%r22}, ...
 | 地址算术 | **10** | A:4 算偏移+1 `add`;B:4 算偏移+1 `add`(`%r31` 两边共用) |
 | 基址 mov | 2 | `sA`、`sBn` |
 
-`.x4` 的四个目标寄存器 `{%r16..%r19}` 就是 `a[0..3]`;`.x2` 的 `{%r21,%r22}` 就是 `b[0],b[1]`。随后 `mma` 直接吃这六个寄存器——和手工路径装完后的寄存器角色相同。
+`.x4` 写出 `{%r16,%r17,%r18,%r19}` = `a[0..3]`;`.x2` 写出 `{%r21,%r22}` = `b[0],b[1]`。两条路径的 `mma` 都从这六个寄存器取操作数。
 
 ### 3.3 对照表
 
@@ -411,19 +412,57 @@ mma.sync ... {%r16..%r19}, {%r21,%r22}, ...
 
 **(a) `ldmatrix` 省掉了手工装载中的哪些工作?**
 
-看 PTX:手工在 `bar` 与 `mma` 之间是 **6 条** `ld.shared.u32`,每条只往 **本 lane** 填一个 b32(`%r16`…`%r21`)。ldmatrix 路径同区间只剩 **2 条** 装载指令:
+对照 `bar.warp.sync` 到 `mma.sync` 之间的装载指令。
 
-- `ldmatrix...x4 ... {%r16,%r17,%r18,%r19}, [%r20]` → 一次写齐 A 的四个色块寄存器
-- `ldmatrix...x2 ... {%r21,%r22}, [%r23]` → 一次写齐 B 的两个半区寄存器
+手工路径是下面 6 条,每条只填本 lane 的一个 b32:
 
-省掉的是「按 fragment 寄存器一条条 `ld.shared`」这 **6→2** 的取数。  
-地址算术 **没有**变少(7→10):每个 lane 仍要算出自己交给 `ldmatrix` 的那条 16 byte 行首(`[%r20]` / `[%r23]`),A、B 两套公式,固定象限位移也折不进 `ldmatrix` 的寻址立即数。
+```
+ld.shared.u32  %r16, [%r28]         → a[0]
+ld.shared.u32  %r17, [%r28+256]     → a[1]
+ld.shared.u32  %r18, [%r28+16]      → a[2]
+ld.shared.u32  %r19, [%r28+272]     → a[3]
+ld.shared.u32  %r20, [%r30]         → b[0]
+ld.shared.u32  %r21, [%r30+16]      → b[1]
+```
+
+ldmatrix 路径变成下面 2 条:
+
+```
+ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r16,%r17,%r18,%r19}, [%r20]
+    → 一次写出 a[0], a[1], a[2], a[3](四个色块)
+
+ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r21,%r22}, [%r23]
+    → 一次写出 b[0], b[1](两个 K 半区)
+```
+
+**变成了什么:** 装载从 6 条 `ld.shared.u32` 变成 1 条 `ldmatrix...x4` 加 1 条 `ldmatrix...x2`。
+
+**省了什么:** 按 fragment 寄存器逐个从 smem 取数(那 6 次 `ld.shared`)。
+
+**没有省什么:** 算地址。手工路径地址算术 7 条(算出 `%r26`,再加到 `sA`/`sBn`);ldmatrix 路径地址算术 10 条(算出行首 `%r20`、`%r23`)。每个 lane 仍要提供自己那条 16 byte 行的起点;手工里 `%r28+256`、`%r28+16`、`%r28+272` 那种立即数折算,在 `ldmatrix` 的 `[%r20]` / `[%r23]` 上用不上。
 
 **(b) 为什么这些工作在手工路径里绕不开?**
 
-手工路径的契约是:`ld.shared.u32` 把 **本 lane** 指针上的 4 byte 写进 **本 lane** 的一个寄存器。A+B 一共 6 个 b32,PTX 里就出现 6 次 load;「一次读多行、再按 fragment 图拆到各 lane」没有对应的普通 load 形态。
+`ld.shared.u32 %rdst, [%addr]` 的含义是:从本 lane 的 `%addr` 读 4 个 byte,写进本 lane 的 `%rdst`。A 要 4 个 b32、B 要 2 个 b32,一共 6 次读,所以手工 PTX 里必须有那 6 条 `ld.shared.u32`。普通 shared load 做不到「一次读多行,再按 fragment 图写到各 lane 的多个寄存器」。
 
-`ldmatrix` 把这件事收成一条 warp 指令:输入是各 lane 的行首,输出已经是 `{%r16..%r19}` / `{%r21,%r22}` 这种可直接喂给 `mma` 的 fragment 寄存器(两条路径的 `mma` 源寄存器表一致)。没有这条指令时,软件只能继续用逐寄存器 `ld.shared`(或自己 load + shuffle),条数随 fragment 寄存器个数线性涨——这就是手工路径在 PTX 里绕不开 6 条 `ld.shared` 的原因。
+`ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r16,%r17,%r18,%r19}, [%r20]` 的含义是:warp 内各 lane 交出各自的 16 byte 行首 `%r20`,硬件读行并按 fragment 图写入 `%r16,%r17,%r18,%r19`。  
+`ldmatrix.sync.aligned.m8n8.x2.shared.b16 {%r21,%r22}, [%r23]` 同理写出 `%r21,%r22`。
+
+写完之后发 MMA。手工路径:
+
+```
+mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32
+    {%f1,%f2,%f3,%f4}, {%r16,%r17,%r18,%r19}, {%r20,%r21}, {%f8,%f8,%f8,%f8}
+```
+
+ldmatrix 路径:
+
+```
+mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32
+    {%f1,%f2,%f3,%f4}, {%r16,%r17,%r18,%r19}, {%r21,%r22}, {%f8,%f8,%f8,%f8}
+```
+
+两边都是从六个 fragment 寄存器取 A、B(B 的物理寄存器号不同:`%r20,%r21` 对 `%r21,%r22`,角色相同)。没有 `ldmatrix` 时,只能继续用 6 条 `ld.shared.u32`(或自己 load 再 shuffle)把数据装进这些寄存器,装载条数跟着 fragment 寄存器个数走。这就是手工路径绕不开那 6 条 `ld.shared` 的原因。
 
 ---
 
