@@ -474,3 +474,226 @@ mma.sync.aligned.m16n8k32.row.col.f32.e4m3.e4m3.f32
 ldmatrix PTX:1× .x4 + 1× .x2 + 10 条地址算术
 省的是装载条数(6→2),不是算行首
 ```
+
+---
+
+# Section 1 · Problem 1.5 —— 行跨度与 ldmatrix 的 bank conflict
+
+> 配套代码:`cuda/m1_sm80/05_ldsm_stride.cu`(程序不用改)
+> GPU:RTX 5090(`gj-5090-1`,CC 12.0),`ARCH=120a`
+>
+> 本题要练两件事:(1) 用 bank 模型先预测;(2) 用程序计时 + **Nsight Compute (`ncu`)** 拿硬件计数器交叉验证。结论要有数,也要会留「我怎么测到的」痕迹。
+
+---
+
+## 0. 集群上怎么跑:登录节点 vs GPU 节点
+
+你 `ssh` 上去默认站在 **登录节点**(`slurm-login`)。它是一台普通 Linux:有文件系统、编译器、`srun`,但 **通常没有可用的 GPU 驱动/设备**(在上面直接跑 CUDA 二进制常会 `cudaErrorInsufficientDriver`)。
+
+要跑 kernel / `ncu`,需要向调度器要一台 **计算节点**,并把命令放到那台机器上执行:
+
+```bash
+cd ~/ai-infra/wmhpc-training-camp-x-lcpu-ai-infra-seminars/assignment02/cuda
+
+# 编译(建议在计算节点上 make,避免登录节点与计算节点看到的 bin 不同步)
+srun -p lcpu-infra --gpus=1 bash -lc \
+  'cd '"$PWD"' && make ARCH=120a -B bin/m1_sm80/05_ldsm_stride'
+
+# 只看程序自己的 cycle
+srun -p lcpu-infra --gpus=1 bash -lc \
+  'cd '"$PWD"' && ./bin/m1_sm80/05_ldsm_stride'
+
+# 用 ncu 看 shared load 的 wavefront / bank conflict
+srun -p lcpu-infra --gpus=1 bash -lc \
+  'cd '"$PWD"' && ncu --metrics \
+    l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum,\
+l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum \
+    ./bin/m1_sm80/05_ldsm_stride'
+```
+
+技能点:**登录节点 = 写代码 / 提交作业的前门;GPU 在计算节点上,用 `srun`/`sbatch` 进去用。** `ncu` 也必须在有 GPU 的节点上跑,并且对「当前目录下的二进制」要用 `cd` 后再写相对路径。
+
+---
+
+## 1. 题目在问什么
+
+同一个 **16×16 fp16** tile 用 `ldmatrix.m8n8.x4` 从 smem 装进 fragment。变的只有 **行跨度** `STRIDE`:
+
+| 档位 | `STRIDE` | 含义 |
+|------|----------|------|
+| 32 B | 32 | 紧凑:一行 16 个 fp16 = 32 B |
+| 64 B | 64 | 行距加倍 |
+| 128 B | 128 | 像嵌在更宽矩阵里 |
+| 128+16 B | 144 | 128 再加 16 B padding |
+
+kernel:**8 个 warp** 同发、各用自己的 smem 区,循环 `ITERS=4096` 次 `ldmatrix`,打印均摊 cycle;再用 `ncu` 数 shared **load** 的 wavefront 与 bank conflict。
+
+1.4 说 `ldmatrix` 能少装载指令;1.5 说 **smem 行跨度仍会通过 bank conflict 拖慢这条指令**。
+
+---
+
+## 2. Profiling 技能树:`ncu` 是什么、本题两个计数器是什么
+
+### 2.1 程序自己的 cycle vs `ncu`
+
+| 手段 | 看到什么 | 看不到什么 |
+|------|----------|------------|
+| `clock64()` 包住循环(本题程序自带) | 「这段代码大概花了多少拍」 | 为什么慢(是算力、是 smem、还是别的) |
+| `ncu --metrics ...` | 硬件管道上的**具名事件计数** | 需要你自己选对 metric、会读表 |
+
+两者要一起看:cycle 说「有多痛」,metric 说「痛在哪条管子上」。
+
+### 2.2 Nsight Compute(`ncu`)本质上干什么
+
+`ncu` 是 NVIDIA 的 **kernel 级性能分析器**。它会:
+
+1. 启动你的进程,在每次 GPU kernel launch 时插入采集;
+2. 按你点名的 **metric** 在硬件/驱动计数器上累加;
+3. 按「每一次 kernel 调用」打一份表(本题每个 `STRIDE` 会 launch 两次:warmup + 正式,所以同名 kernel 出现两份相同数字)。
+
+本题只要 shared memory **读** 路径上的两个量:
+
+| Metric 全名 | 口语 | 含义 |
+|-------------|------|------|
+| `l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum` | **wavefronts** | shared **load** 在 LSU 数据管道上发出的 wavefront 总数。同一 bank 被多人挤时,一次逻辑访问会拆成多拍 → 这个数变大 |
+| `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` | **bank conflicts** | 上述路径上统计到的 **bank conflict** 次数。无冲突布局应接近 **0** |
+
+读表口诀:
+
+- 先看 **四个 `STRIDE` 的 wavefront 比值**是否像 bank 模型(本题期望 2:4:8:1);
+- 再看 **conflict**:padding 档应接近 0;
+- 最后才拿程序打印的 **cycle** 对比「比值有没有被多 warp 削平」。
+
+---
+
+## 3. 先预测:bank 模型
+
+约定:
+
+- smem **32 bank**,每 bank **4 byte**;bank = `(字节地址 / 4) % 32`
+- 同一小块里 8 个 lane 各交一条 16 byte 行首;起点挤在同一组 bank → 多 wavefront
+
+代码里(忽略每 warp 基址):
+
+```
+row  = lane % 16
+half = lane / 16
+addr = row * STRIDE + half * 16
+```
+
+一个色块内 8 行起点 `r * STRIDE`(`r=0..7`):
+
+| `STRIDE` | 起点 bank `(r*STRIDE/4)%32` | 撞车程度 | 相对无冲突的预测 |
+|----------|-----------------------------|----------|-------------------|
+| 32 | 0,8,16,24 循环 | 2 路 | **2×** |
+| 64 | 0,16 循环 | 4 路 | **4×** |
+| 128 | 全是 0 | 8 路 | **8×** |
+| 144 | 0,4,8,…,28 | 8 行互不撞 | **1×** |
+
+`128 B` 在本模式最差:`128/4=32`,行距刚好绕完一圈 bank,每行起点又回到 0。`+16` padding 错开起点。题面「增加到 **4 倍**」相对无冲突基线 → **64 B**。
+
+冲突域按 **每个 m8n8 小块的 8 行** 看:144B 在单块内无起点碰撞;ncu 上 conflict 可为 0(不要把 16 行揉成同一拍再硬说「还有 2 路」)。
+
+---
+
+## 4. 原汁原味实测输出(5090)
+
+下面是计算节点上一次完整 `ncu` 跑的摘录(与你终端一致)。程序在 profiling 过程中仍会打印 cycle 行。
+
+### 4.1 程序打印的 cycle
+
+```text
+stride 32B        9.93 cycles / ldmatrix(8 warp 均摊)
+stride 64B       10.91 cycles / ldmatrix(8 warp 均摊)
+stride 128B      16.07 cycles / ldmatrix(8 warp 均摊)
+stride 128B+pad   9.41 cycles / ldmatrix(8 warp 均摊)
+```
+
+### 4.2 `ncu` 表头在说什么
+
+```text
+==PROF== Connected to process .../05_ldsm_stride
+==PROF== Profiling "ldsm_kernel" - 0: ... 100% - 1 pass
+...
+==PROF== Profiling "ldsm_kernel" - 7: ... 100% - 1 pass
+```
+
+- `ldsm_kernel` 出现 **0..7 共 8 次 pass**:四个 `STRIDE` ×(warmup + 正式)各一次。
+- 每一段标题形如 `void ldsm_kernel<32>(...)`:`<32>` 就是模板参数 `STRIDE`。
+
+### 4.3 四档计数器(每档两份相同,这里各留一份)
+
+**`STRIDE=32`**
+
+```text
+void ldsm_kernel<32>(...)
+  l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum          8192
+  l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum             16384
+```
+
+**`STRIDE=64`**
+
+```text
+void ldsm_kernel<64>(...)
+  l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum         24576
+  l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum             32768
+```
+
+**`STRIDE=128`**
+
+```text
+void ldsm_kernel<128>(...)
+  l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum         57344
+  l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum             65536
+```
+
+**`STRIDE=144`(128B+pad)**
+
+```text
+void ldsm_kernel<144>(...)
+  l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum             0
+  l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum              8192
+```
+
+### 4.4 汇总表(题面要填的)
+
+以 pad 的 8192 wavefront 为 **1×**:
+
+| 档位 | 预测比 | 实测 wavefront | 实测 conflict | 平均 cycle | 实测比 |
+|------|--------|----------------|---------------|------------|--------|
+| 32 B | 2× | 16384 | 8192 | 9.93 | **2×** |
+| 64 B | 4× | 32768 | 24576 | 10.91 | **4×** |
+| 128 B | 8× | 65536 | 57344 | 16.07 | **8×** |
+| 128+16 B | 1× | 8192 | **0** | 9.41 | **1×** |
+
+预测与 ncu **一致**。cycle 从 9.4→10.9→16,远小于 1:4:8。
+
+---
+
+## 5. 怎么读这坨输出(学习目标)
+
+1. **认出 kernel 模板参数** = 你在扫哪一档布局。
+2. **同一 `STRIDE` 出现两次** = warmup/正式;写报告取一份即可,或注明「两次相同」。
+3. **先比 wavefront 列的倍数**,再看 conflict 是否在 pad 上掉到 0——这是「模型对了没有」的硬证据。
+4. **再看 cycle**:若 wavefront×4 而 cycle 只微增,回去看代码是不是 **多 warp** 在喂 LSU(本题 8 warp)。
+
+这就是「能复现、能指着计数器说话」的完整链条:假设 → 命令 → 原始输出 → 填表 → 解释差值。
+
+---
+
+## 6. 为什么 wavefront ×4 不会让耗时也 ×4
+
+8 个 warp 同时打 LSU。一个 warp 因 conflict 多拍完成 shared 读时,别的 warp 仍可向 LSU 发请求。conflict 让管道更忙,不等于整个 SM 按 wavefront 倍数空转。
+
+所以:**wavefront/conflict 验证布局;cycle 反映在占用度下的体感延迟。** 单 warp 时 cycle 差距通常更刺眼;本题故意 8 warp,就是让你看见「计数器很惨、时间没那么惨」。
+
+---
+
+## 7. 小结
+
+```
+登录节点无 GPU → srun 上计算节点再跑 CUDA / ncu
+ncu:按 kernel launch 采硬件计数器;本题看 shared load 的 wavefront 与 conflict
+布局相对无冲突:32B→2×, 64B→4×, 128B→8×, 144B→1×(conflict=0)
+保留原始 ncu 片段 + 填表 + 解释 cycle 被 8 warp 削平
+```
