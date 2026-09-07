@@ -555,8 +555,10 @@ kernel:**8 个 warp** 同发、各用自己的 smem 区,循环 `ITERS=4096` 次 
 
 | Metric 全名 | 口语 | 含义 |
 |-------------|------|------|
-| `l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum` | **wavefronts** | shared **load** 在 LSU 数据管道上发出的 wavefront 总数。同一 bank 被多人挤时,一次逻辑访问会拆成多拍 → 这个数变大 |
+| `l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum` | **wavefronts** | shared **load** 在「读写内存的硬件通路」上发出的 wavefront 总数。同一 bank 被多人挤时,一次逻辑访问会拆成多拍 → 这个数变大 |
 | `l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum` | **bank conflicts** | 上述路径上统计到的 **bank conflict** 次数。无冲突布局应接近 **0** |
+
+> metric 名字里的 `lsu` 是 NVIDIA 对这条通路的内部标签(Load/Store Unit,读写单元),报告正文里一律说成「读写内存的硬件通路 / 共享内存读通路」,不再单独甩缩写。
 
 读表口诀:
 
@@ -674,11 +676,11 @@ void ldsm_kernel<144>(...)
 
 ### 5.1 两个计数器的单位是什么
 
-两条 metric 都是 **一次 kernel launch 内的累加次数**(`.sum`),单位不是「秒」,也不是「每个 bank 被点了几次」的抽象分数,而是 L1TEX/LSU 管道上的 **wavefront 事件**:
+两条 metric 都是 **一次 kernel launch 内的累加次数**(`.sum`),单位不是「秒」,也不是「每个 bank 被点了几次」的抽象分数,而是 GPU 里 **负责读写内存的那条硬件通路** 上的 **wavefront 事件**(shared 读走这条路):
 
 | 计数器 | 单位(口语) | 硬件在数什么 |
 |--------|------------|--------------|
-| `...wavefronts_mem_shared_op_ld` | **shared load wavefront 数** | 这条 shared **读** 在 LSU 数据管上实际发出了多少个 wavefront(含因冲突而串行重放的) |
+| `...wavefronts_mem_shared_op_ld` | **shared load wavefront 数** | 这条 shared **读** 在读写通路上实际发出了多少个 wavefront(含因冲突而串行重放的) |
 | `...bank_conflicts_..._shared_op_ld` | **多余的 wavefront 数** | 相对「同一种访问在无冲突时最少需要多少 wavefront」,多出来的那些拍 |
 
 NVIDIA 对这类 metric 的口径就是:
@@ -761,20 +763,20 @@ conflicts(N)   = wavefronts − W0 = (N − 1) × 8192
 
 ### 6.1 两个数根本不是同一个瓶颈视角
 
-- **wavefront / conflict**:在问「这一次 shared 读,LSU 数据管上要串多少拍才能把请求做完」。布局越烂,串得越长,**这个数可以接近线性跟 N 走**。
+- **wavefront / conflict**:在问「这一次 shared 读,在读写内存的硬件通路上要串多少拍才能把请求做完」。布局越烂,串得越长,**这个数可以接近线性跟 N 走**。
 - **程序打印的 cycle**:`clock64` 包住整个 `for (i < ITERS)` 再除以 `ITERS`,得到的是 **「在当前 SM 调度下,平均一次循环墙钟过了多少拍」**。墙钟里同时还有:别的 warp 有没有活干、流水线能不能重叠、同步与写回等。
 
-所以 wavefront ×4 只证明 **这条 smem 读变重了 4 倍**;并不自动等于 **整个 kernel 的耗时 ×4**——除非 smem/LSU 已经是唯一瓶颈,且没有任何并发能把等待盖住。
+所以 wavefront ×4 只证明 **这条 smem 读变重了 4 倍**;并不自动等于 **整个 kernel 的耗时 ×4**——除非共享内存读已经是唯一瓶颈,且没有任何并发能把等待盖住。
 
 ### 6.2 本题故意放了 8 个 warp
 
-代码注释写得很直白:8 个 warp 同发,把 LSU 打满;单 warp 的话流水会把串行化掩掉大半。机制可以拆成三步想:
+代码注释写得很直白:8 个 warp 同发,把共享内存读通路打满;单 warp 的话流水会把串行化掩掉大半。机制可以拆成三步想:
 
-1. **一个 warp 因 bank conflict 要在 LSU 上多待几拍**时,它自己的这条 `ldmatrix` 确实更慢(计数器已经记下来了)。
+1. **一个 warp 因 bank conflict 要在共享内存读通路上多待几拍**时,它自己的这条 `ldmatrix` 确实更慢(计数器已经记下来了)。
 2. **同一个 SM 上还有别的 warp**。调度器可以在 A warp 等 smem 重放时,切去让 B/C/… warp 发射它们的内存或算术。对 **单个 warp** 来说等待变长了;对 **整块 `clock64` 墙钟** 来说,这段时间往往被别的 warp 的有用工作填上。
-3. 因此:conflict 让 **LSU 更忙**(wavefront 上去),但不等于让 **整个 SM 按同样倍数空转**。占用度够高时,你看到的是「管道更饱和」,不是「时间线性爆炸」。
+3. 因此:conflict 让 **共享内存读通路更忙**(wavefront 上去),但不等于让 **整个 SM 按同样倍数空转**。占用度够高时,你看到的是「这条通路更饱和」,不是「时间线性爆炸」。
 
-64B 相对 pad:wavefront ×4,cycle 几乎不动 → 说明在 8 warp 下,多出来的 smem 拍大多被并发盖住了,LSU 还不是把墙钟钉死的唯一限制。128B 到了 8 路,LSU 足够堵,cycle 才明显抬到 ~16,但仍然远小于 ×8。
+64B 相对 pad:wavefront ×4,cycle 几乎不动 → 说明在 8 warp 下,多出来的 smem 拍大多被并发盖住了,共享内存读还不是把墙钟钉死的唯一限制。128B 到了 8 路,读通路足够堵,cycle 才明显抬到 ~16,但仍然远小于 ×8。
 
 ### 6.3 均摊写法也会让「倍数」看起来更温和
 
@@ -785,9 +787,9 @@ conflicts(N)   = wavefronts − W0 = (N − 1) × 8192
 若改成 `<<<1, 32>>>`(1 个 warp)再测同一组 `STRIDE`:
 
 - ncu 的 **相对倍数** 往往仍接近 2:4:8:1(布局没变);
-- 但 **cycle 差距通常会刺眼得多**,因为没有其它 warp 来填 LSU 等待——墙钟更接近「那条 shared 读本身有多痛」。
+- 但 **cycle 差距通常会刺眼得多**,因为没有其它 warp 来填共享内存读的等待——墙钟更接近「那条 shared 读本身有多痛」。
 
-本题用 8 warp,就是布置题里说的那一刀:**让你亲眼看见「计数器很惨、时间没那么惨」**,并在报告里把原因说到占用度/LSU 并发上,而不是怀疑 bank 模型测错了。
+本题用 8 warp,就是布置题里说的那一刀:**让你亲眼看见「计数器很惨、时间没那么惨」**,并在报告里把原因说到占用度、以及多个 warp 能不能把读等待盖住,而不是怀疑 bank 模型测错了。
 
 ### 6.5 读数口诀
 
@@ -807,5 +809,5 @@ conflicts(N)   = wavefronts − W0 = (N − 1) × 8192
 ncu: wavefronts = 实际 shared-load 拍数; conflicts ≈ wavefronts − W0
 W0 = 2 × ITERS = 8192(pad 档 conflict=0 标定); N 路 → W=N×W0, C=(N−1)×W0
 布局:32B→2×, 64B→4×, 128B→8×, 144B→1×(conflict=0)
-cycle 不跟 ×N:8 warp 把 LSU 等待盖住一截;计数器惨 ≠ 墙钟同倍惨
+cycle 不跟 ×N:8 warp 把共享内存读的等待盖住一截;计数器惨 ≠ 墙钟同倍惨
 ```
