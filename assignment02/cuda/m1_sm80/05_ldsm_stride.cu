@@ -8,7 +8,7 @@
 // 先预测再运行:按课上的 bank 模型,每档一次 ldmatrix 需要几个
 // wavefront?把四档的比值写下来再跑。ncu 的 wavefront 与 conflict
 // 计数用来验证预测;耗时的比值会比 wavefront 比值小,报告里解释
-// 这个差别(提示:8 个 warp 的占用度下,共享内存读是不是唯一瓶颈)。
+// 这个差别(提示:8 个 warp 的占用度下,Load/Store Unit 是不是唯一瓶颈)。
 // ncu 命令(两个计数器):
 //   ncu --metrics l1tex__data_pipe_lsu_wavefronts_mem_shared_op_ld.sum,\
 //       l1tex__data_bank_conflicts_pipe_lsu_mem_shared_op_ld.sum \
@@ -22,7 +22,7 @@
 
 constexpr int ITERS = 4096;
 
-// 8 个 warp 同发把共享内存读通路打满,吞吐由 bank 冲突决定;单 warp 的话
+// 8 个 warp 同发把 Load/Store Unit 打满,吞吐由 bank 冲突决定;单 warp 的话
 // 流水会把串行化掩掉大半。每 warp 用自己的 smem 区域,访问模式相同。
 template <int STRIDE>
 __global__ void ldsm_kernel(unsigned* out, long long* cycles) {
